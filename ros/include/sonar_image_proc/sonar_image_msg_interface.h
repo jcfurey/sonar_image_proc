@@ -7,19 +7,21 @@
 #pragma once
 
 #include <vector>
+#include <memory>
 
+#include "marine_acoustic_msgs/msg/projected_sonar_image.hpp"
 #include "sonar_image_proc/AbstractSonarInterface.h"
 
 namespace sonar_image_proc {
 
-using marine_acoustic_msgs::ProjectedSonarImage;
+using marine_acoustic_msgs::msg::ProjectedSonarImage;
 using sonar_image_proc::AbstractSonarInterface;
 using std::vector;
 
 struct SonarImageMsgInterface
     : public sonar_image_proc::AbstractSonarInterface {
   explicit SonarImageMsgInterface(
-      const marine_acoustic_msgs::ProjectedSonarImage::ConstPtr &ping)
+      const std::shared_ptr<const marine_acoustic_msgs::msg::ProjectedSonarImage> &ping)
       : _ping(ping), do_log_scale_(false) {
     // Vertical field of view is determined by comparing
     // z / sqrt(x^2 + y^2) to tan(elevation_beamwidth/2)
@@ -171,7 +173,7 @@ struct SonarImageMsgInterface
   }
 
  protected:
-  marine_acoustic_msgs::ProjectedSonarImage::ConstPtr _ping;
+  std::shared_ptr<const marine_acoustic_msgs::msg::ProjectedSonarImage> _ping;
 
   float _verticalTanSquared;
   std::vector<float> _ping_azimuths;
