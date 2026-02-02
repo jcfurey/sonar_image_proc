@@ -88,15 +88,26 @@ ament_target_dependencies(sonar_postprocessor_node
   rclcpp
 )
 
-# TODO: Port bag2sonar tool to rosbag2 API
-# add_executable(bag2sonar ros/tools/bag2sonar.cpp)
-# target_link_libraries(bag2sonar sonar_image_proc)
-# ament_target_dependencies(bag2sonar
-#   rclcpp
-#   rosbag2_cpp
-#   sensor_msgs
-#   marine_acoustic_msgs
-# )
+# bag2sonar tool for offline processing
+find_package(Boost REQUIRED COMPONENTS program_options)
+
+add_executable(bag2sonar ros/tools/bag2sonar.cpp)
+target_link_libraries(bag2sonar 
+  sonar_image_proc
+  Boost::program_options
+)
+target_include_directories(bag2sonar PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/ros/include
+)
+ament_target_dependencies(bag2sonar
+  rclcpp
+  rosbag2_cpp
+  rosbag2_storage
+  sensor_msgs
+  marine_acoustic_msgs
+  cv_bridge
+)
 
 # Install targets
 install(TARGETS
@@ -110,6 +121,7 @@ install(TARGETS
 install(TARGETS
   draw_sonar_node
   sonar_postprocessor_node
+  bag2sonar
   DESTINATION lib/${PROJECT_NAME}
 )
 

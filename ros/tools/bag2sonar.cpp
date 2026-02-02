@@ -1,13 +1,20 @@
-#include <cv_bridge/cv_bridge.h>
-#include <marine_acoustic_msgs/ProjectedSonarImage.h>
-#include <rosbag/bag.h>
-#include <rosbag/view.h>
+#include <cv_bridge/cv_bridge.hpp>
+#include <marine_acoustic_msgs/msg/projected_sonar_image.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <rclcpp/serialization.hpp>
+#include <rclcpp/time.hpp>
+#include <rosbag2_cpp/reader.hpp>
+#include <rosbag2_cpp/writer.hpp>
+#include <rosbag2_cpp/writers/sequential_writer.hpp>
+#include <rosbag2_storage/storage_options.hpp>
 #include <sonar_image_proc/sonar_image_msg_interface.h>
 
 #include <boost/program_options.hpp>
 #include <opencv2/core.hpp>
+#include <iostream>
 #include <string>
 #include <vector>
+#include <memory>
 
 #include "sonar_image_proc/SonarDrawer.h"
 
@@ -19,29 +26,59 @@ using std::vector;
 class OutputWrapper {
  public:
   virtual void write(
-      const marine_acoustic_msgs::ProjectedSonarImage::ConstPtr &msg,
+      const std::shared_ptr<const marine_acoustic_msgs::msg::ProjectedSonarImage> &msg,
       const cv::Mat &mat) = 0;
+  virtual ~OutputWrapper() = default;
 };
 
 class BagOutput : public OutputWrapper {
  public:
-  BagOutput(const std::string &bagfile, const std::string topic)
-      : _bag(bagfile, rosbag::bagmode::Write), _topic(topic) {}
-
-  void write(const marine_acoustic_msgs::ProjectedSonarImage::ConstPtr &msg,
-             const cv::Mat &mat) override {
-    cv_bridge::CvImage img_bridge(msg->header,
-                                  sensor_msgs::image_encodings::RGB8, mat);
-
-    sensor_msgs::Image output_msg;
-    img_bridge.toImageMsg(output_msg);
-
-    // Retain original message's timestamp
-    _bag.write(_topic, msg->header.stamp, output_msg);
+  BagOutput(const std::string &bagfile, const std::string &topic)
+      : topic_(topic) {
+    rosbag2_storage::StorageOptions storage_options;
+    storage_options.uri = bagfile;
+    storage_options.storage_id = "sqlite3";
+    
+    rosbag2_cpp::ConverterOptions converter_options;
+    converter_options.input_serialization_format = "cdr";
+    converter_options.output_serialization_format = "cdr";
+    
+    writer_ = std::make_unique<rosbag2_cpp::Writer>();
+    writer_->open(storage_options, converter_options);
+    
+    // Create topic metadata
+    rosbag2_storage::TopicMetadata topic_metadata;
+    topic_metadata.name = topic;
+    topic_metadata.type = "sensor_msgs/msg/Image";
+    topic_metadata.serialization_format = "cdr";
+    writer_->create_topic(topic_metadata);
   }
 
-  rosbag::Bag _bag;
-  std::string _topic;
+  void write(const std::shared_ptr<const marine_acoustic_msgs::msg::ProjectedSonarImage> &msg,
+             const cv::Mat &mat) override {
+    cv_bridge::CvImage img_bridge(msg->header, "rgb8", mat);
+    auto output_msg = img_bridge.toImageMsg();
+
+    // Serialize and write the message
+    auto serialized_msg = std::make_shared<rclcpp::SerializedMessage>();
+    rclcpp::Serialization<sensor_msgs::msg::Image> serialization;
+    serialization.serialize_message(output_msg.get(), serialized_msg.get());
+    
+    // Use the original message timestamp
+    rclcpp::Time timestamp(msg->header.stamp);
+    
+    writer_->write(serialized_msg, topic_, "sensor_msgs/msg/Image", timestamp);
+  }
+
+  ~BagOutput() {
+    if (writer_) {
+      writer_->close();
+    }
+  }
+
+ private:
+  std::unique_ptr<rosbag2_cpp::Writer> writer_;
+  std::string topic_;
 };
 
 void print_help(const po::options_description &description) {
@@ -122,53 +159,74 @@ int main(int argc, char **argv) {
 
     std::vector<std::string> files =
         vm["input-files"].as<std::vector<std::string>>();
-    for (std::string file : files) {
+    for (const std::string &file : files) {
       std::cout << "Processing input file " << file << std::endl;
 
-      rosbag::Bag bag(file, rosbag::bagmode::Read);
-
-      std::cout << "Bagfile " << file << " is " << bag.getSize() << " bytes"
-                << std::endl;
-
-      rosbag::View view(
-          bag, rosbag::TypeQuery("marine_acoustic_msgs/ProjectedSonarImage"));
+      rosbag2_cpp::Reader reader;
+      rosbag2_storage::StorageOptions storage_options;
+      storage_options.uri = file;
+      storage_options.storage_id = "sqlite3";
+      
+      rosbag2_cpp::ConverterOptions converter_options;
+      converter_options.input_serialization_format = "cdr";
+      converter_options.output_serialization_format = "cdr";
+      
+      reader.open(storage_options, converter_options);
 
       int count = 0;
 
-      BOOST_FOREACH (rosbag::MessageInstance const m, view) {
-        marine_acoustic_msgs::ProjectedSonarImage::ConstPtr msg =
-            m.instantiate<marine_acoustic_msgs::ProjectedSonarImage>();
+      // Set up deserialization
+      rclcpp::Serialization<marine_acoustic_msgs::msg::ProjectedSonarImage> serialization;
 
-        sonar_image_proc::SonarImageMsgInterface interface(msg);
-        if (vm["logscale"].as<bool>()) {
-          interface.do_log_scale(vm["min-db"].as<float>(),
-                                 vm["max-db"].as<float>());
+      while (reader.has_next()) {
+        auto bag_message = reader.read_next();
+        
+        // Check if this is a ProjectedSonarImage message
+        if (bag_message->topic_name.find("sonar") == std::string::npos &&
+            bag_message->topic_name.find("image") == std::string::npos) {
+          continue;  // Skip non-sonar topics
         }
 
-        cv::Mat rectMat =
-            sonar_drawer.drawRectSonarImage(interface, *color_map);
+        try {
+          rclcpp::SerializedMessage serialized_msg(*bag_message->serialized_data);
+          auto msg = std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>();
+          serialization.deserialize_message(&serialized_msg, msg.get());
 
-        cv::Mat sonarMat = sonar_drawer.remapRectSonarImage(interface, rectMat);
+          sonar_image_proc::SonarImageMsgInterface interface(msg);
+          if (vm["logscale"].as<bool>()) {
+            interface.do_log_scale(vm["min-db"].as<float>(),
+                                   vm["max-db"].as<float>());
+          }
 
-        cv::Mat outMat;
-        if (vm["osd"].as<bool>()) {
-          outMat = sonar_drawer.drawOverlay(interface, sonarMat);
-        } else {
-          outMat = sonarMat;
-        }
+          cv::Mat rect_mat =
+              sonar_drawer.drawRectSonarImage(interface, *color_map);
 
-        for (auto output : outputs) {
-          output->write(msg, outMat);
-        }
+          cv::Mat sonar_mat = sonar_drawer.remapRectSonarImage(interface, rect_mat);
 
-        count++;
+          cv::Mat out_mat;
+          if (vm["osd"].as<bool>()) {
+            out_mat = sonar_drawer.drawOverlay(interface, sonar_mat);
+          } else {
+            out_mat = sonar_mat;
+          }
 
-        if ((count % 100) == 0) {
-          std::cout << "Processed " << count << " sonar frames" << std::endl;
+          for (auto &output : outputs) {
+            output->write(msg, out_mat);
+          }
+
+          count++;
+
+          if ((count % 100) == 0) {
+            std::cout << "Processed " << count << " sonar frames" << std::endl;
+          }
+        } catch (const std::exception &e) {
+          // Skip messages that can't be deserialized as ProjectedSonarImage
+          continue;
         }
       }
 
-      bag.close();
+      reader.close();
+      std::cout << "Processed " << count << " total sonar frames from " << file << std::endl;
     }
   }
 

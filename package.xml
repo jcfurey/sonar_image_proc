@@ -23,6 +23,7 @@
   <depend>std_msgs</depend>
 
   <build_depend>rosbag2_cpp</build_depend>
+  <build_depend>rosbag2_storage</build_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
