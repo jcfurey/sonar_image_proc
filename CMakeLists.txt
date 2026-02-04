@@ -129,6 +129,11 @@ install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
+install(DIRECTORY params/
+  DESTINATION share/${PROJECT_NAME}/params
+  FILES_MATCHING PATTERN "*.yaml"
+)
+
 install(DIRECTORY include/
   DESTINATION include/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h"

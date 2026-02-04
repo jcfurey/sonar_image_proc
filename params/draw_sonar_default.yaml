@@ -1,0 +1,31 @@
+/**:
+  ros__parameters:
+    # Visualization parameters for draw_sonar node
+    
+    # Color map for rendering (options: inferno, hot, jet, etc.)
+    color_map: "inferno"
+    
+    # Use logarithmic scale for intensity values (helps with dynamic range)
+    # When enabled with min_db=0.0, max_db=0.0, uses full -96dB to 0dB range
+    log_scale: false
+    
+    # Intensity range for log scale (in dB)
+    # min_db: Minimum intensity threshold (0.0 = auto, uses ~-96dB)
+    # max_db: Maximum intensity threshold (0.0 = auto, uses 0dB)
+    # Example: min_db: -40.0, max_db: 0.0 compresses 40dB range to full display
+    min_db: -80.0
+    max_db: 0.0
+    
+    # Maximum range to display (0.0 = auto, uses full sonar range)
+    max_range: 0.0
+    
+    # Overlay grid settings
+    range_spacing: 10.0      # Spacing between range circles (meters, 0 for auto)
+    bearing_spacing: 10.0    # Spacing between bearing lines (degrees)
+    line_alpha: 0.5          # Opacity of overlay lines (0.0-1.0)
+    line_thickness: 1        # Thickness of overlay lines (pixels)
+    
+    # Publishing options
+    publish_histogram: false  # Publish histogram data
+    publish_timing: true      # Publish timing information
+    publish_old: false        # Publish using deprecated API

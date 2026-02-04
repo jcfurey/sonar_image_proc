@@ -7,6 +7,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, ComposableNodeContainer, PushRosNamespace
 from launch_ros.descriptions import ComposableNode
+import os
 
 
 def generate_launch_description():
@@ -27,6 +28,12 @@ def generate_launch_description():
         'namespace',
         default_value='',
         description='Top-level namespace for the nodes'
+    )
+    
+    params_file_arg = DeclareLaunchArgument(
+        'params_file',
+        default_value='',
+        description='Path to YAML params file (e.g., oculus/common.yaml). If provided, other parameters are ignored.'
     )
     
     use_composition_arg = DeclareLaunchArgument(
@@ -53,12 +60,50 @@ def generate_launch_description():
         description='Use logarithmic scale for intensity'
     )
     
+    gain_arg = DeclareLaunchArgument(
+        'gain',
+        default_value='1.0',
+        description='Gain multiplier for postprocessor (1.0 = no change)'
+    )
+    
+    gamma_arg = DeclareLaunchArgument(
+        'gamma',
+        default_value='0.0',
+        description='Gamma correction for postprocessor (0.0 = no correction)'
+    )
+    
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
+    params_file = LaunchConfiguration('params_file')
     use_composition = LaunchConfiguration('use_composition')
     publish_histogram = LaunchConfiguration('publish_histogram')
     color_map = LaunchConfiguration('color_map')
     log_scale = LaunchConfiguration('log_scale')
+    gain = LaunchConfiguration('gain')
+    gamma = LaunchConfiguration('gamma')
+    
+    # Helper to conditionally load params from file or use inline
+    def get_draw_sonar_params():
+        params_file_str = params_file.perform(None) if hasattr(params_file, 'perform') else ''
+        if params_file_str and os.path.exists(params_file_str):
+            # Load from file
+            return [params_file_str]
+        else:
+            # Use inline parameters
+            return [{
+                'publish_histogram': publish_histogram,
+                'color_map': color_map,
+                'log_scale': log_scale,
+                'max_range': 0.0,
+                'publish_old': False,
+                'publish_timing': True,
+                'range_spacing': 10.0,
+                'bearing_spacing': 10.0,
+                'line_alpha': 0.5,
+                'line_thickness': 1,
+                'min_db': -80.0,
+                'max_db': 0.0,
+            }]
     
     # Raw sonar processing components
     raw_draw_sonar = ComposableNode(
@@ -66,20 +111,7 @@ def generate_launch_description():
         plugin='draw_sonar::DrawSonarComponent',
         name='draw_sonar',
         namespace='oculus',
-        parameters=[{
-            'publish_histogram': publish_histogram,
-            'color_map': color_map,
-            'log_scale': log_scale,
-            'max_range': 0.0,
-            'publish_old': False,
-            'publish_timing': True,
-            'range_spacing': 10.0,
-            'bearing_spacing': 10.0,
-            'line_alpha': 0.5,
-            'line_thickness': 1,
-            'min_db': -80.0,
-            'max_db': 0.0,
-        }],
+        parameters=get_draw_sonar_params(),
         remappings=[
             ('sonar_image', '/oculus/sonar_image'),
         ],
@@ -92,8 +124,8 @@ def generate_launch_description():
         name='sonar_postprocessor',
         namespace='postprocess',
         parameters=[{
-            'gain': 1.0,
-            'gamma': 0.0,
+            'gain': gain,
+            'gamma': gamma,
         }],
         remappings=[
             ('sonar_image', '/oculus/sonar_image'),
@@ -106,20 +138,7 @@ def generate_launch_description():
         plugin='draw_sonar::DrawSonarComponent',
         name='draw_sonar',
         namespace='postprocess',
-        parameters=[{
-            'publish_histogram': publish_histogram,
-            'color_map': color_map,
-            'log_scale': log_scale,
-            'max_range': 0.0,
-            'publish_old': False,
-            'publish_timing': True,
-            'range_spacing': 10.0,
-            'bearing_spacing': 10.0,
-            'line_alpha': 0.5,
-            'line_thickness': 1,
-            'min_db': -80.0,
-            'max_db': 0.0,
-        }],
+        parameters=get_draw_sonar_params(),
         remappings=[
             ('sonar_image', '/postprocess/sonar_image'),
         ],
@@ -146,11 +165,7 @@ def generate_launch_description():
         executable='draw_sonar_node',
         name='draw_sonar',
         namespace='oculus',
-        parameters=[{
-            'publish_histogram': publish_histogram,
-            'color_map': color_map,
-            'log_scale': log_scale,
-        }],
+        parameters=get_draw_sonar_params(),
         remappings=[
             ('sonar_image', '/oculus/sonar_image'),
         ],
@@ -164,8 +179,8 @@ def generate_launch_description():
         name='sonar_postprocessor',
         namespace='postprocess',
         parameters=[{
-            'gain': 1.0,
-            'gamma': 0.0,
+            'gain': gain,
+            'gamma': gamma,
         }],
         remappings=[
             ('sonar_image', '/oculus/sonar_image'),
@@ -180,11 +195,7 @@ def generate_launch_description():
         executable='draw_sonar_node',
         name='draw_sonar',
         namespace='postprocess',
-        parameters=[{
-            'publish_histogram': publish_histogram,
-            'color_map': color_map,
-            'log_scale': log_scale,
-        }],
+        parameters=get_draw_sonar_params(),
         remappings=[
             ('sonar_image', '/postprocess/sonar_image'),
         ],
@@ -195,10 +206,13 @@ def generate_launch_description():
     # Create and return launch description
     return LaunchDescription([
         namespace_arg,
+        params_file_arg,
         use_composition_arg,
         publish_histogram_arg,
         color_map_arg,
         log_scale_arg,
+        gain_arg,
+        gamma_arg,
         component_container,
         raw_draw_sonar_node,
         postprocessor_node,

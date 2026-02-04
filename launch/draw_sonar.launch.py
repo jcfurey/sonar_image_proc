@@ -4,10 +4,12 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
 from launch_ros.actions import ComposableNodeContainer
+from ament_index_python.packages import get_package_share_directory
+import os
 
 
 def generate_launch_description():
@@ -29,6 +31,12 @@ def generate_launch_description():
         'sonar_topic',
         default_value='/oculus/sonar_image',
         description='Input sonar image topic'
+    )
+    
+    params_file_arg = DeclareLaunchArgument(
+        'params_file',
+        default_value='',
+        description='Path to YAML params file (e.g., oculus/common.yaml). If provided, other parameters are ignored.'
     )
     
     use_composition_arg = DeclareLaunchArgument(
@@ -64,27 +72,38 @@ def generate_launch_description():
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
     sonar_topic = LaunchConfiguration('sonar_topic')
+    params_file = LaunchConfiguration('params_file')
     use_composition = LaunchConfiguration('use_composition')
     color_map = LaunchConfiguration('color_map')
     log_scale = LaunchConfiguration('log_scale')
     publish_histogram = LaunchConfiguration('publish_histogram')
     max_range = LaunchConfiguration('max_range')
     
+    # Helper to conditionally load params from file or use inline
+    def get_draw_sonar_params():
+        params_file_str = params_file.perform(None) if hasattr(params_file, 'perform') else ''
+        if params_file_str and os.path.exists(params_file_str):
+            # Load from file
+            return [params_file_str]
+        else:
+            # Use inline parameters
+            return [{
+                'publish_histogram': publish_histogram,
+                'color_map': color_map,
+                'log_scale': log_scale,
+                'max_range': max_range,
+                'publish_old': False,
+                'publish_timing': True,
+                'range_spacing': 10.0,
+                'bearing_spacing': 10.0,
+                'line_alpha': 0.5,
+                'line_thickness': 1,
+                'min_db': -80.0,
+                'max_db': 0.0,
+            }]
+    
     # Define common parameters
-    draw_sonar_params = {
-        'publish_histogram': publish_histogram,
-        'color_map': color_map,
-        'log_scale': log_scale,
-        'max_range': max_range,
-        'publish_old': False,
-        'publish_timing': True,
-        'range_spacing': 10.0,
-        'bearing_spacing': 10.0,
-        'line_alpha': 0.5,
-        'line_thickness': 1,
-        'min_db': -80.0,
-        'max_db': 0.0,
-    }
+    draw_sonar_params = get_draw_sonar_params()
     
     # Component version
     draw_sonar_component = ComposableNode(
@@ -92,7 +111,7 @@ def generate_launch_description():
         plugin='draw_sonar::DrawSonarComponent',
         name='draw_sonar',
         namespace=namespace,
-        parameters=[draw_sonar_params],
+        parameters=draw_sonar_params,
         remappings=[
             ('sonar_image', sonar_topic),
         ],
@@ -125,6 +144,7 @@ def generate_launch_description():
     return LaunchDescription([
         namespace_arg,
         sonar_topic_arg,
+        params_file_arg,
         use_composition_arg,
         color_map_arg,
         log_scale_arg,

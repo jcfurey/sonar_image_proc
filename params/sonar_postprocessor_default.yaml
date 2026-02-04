@@ -1,0 +1,14 @@
+/**:
+  ros__parameters:
+    # Postprocessing parameters for sonar_postprocessor node
+    
+    # Gain multiplier for intensity values
+    # Values > 1.0 brighten the image, < 1.0 darken it
+    # Default: 1.0 (no change)
+    gain: 1.0
+    
+    # Gamma correction value
+    # Used for non-linear intensity adjustment
+    # Default: 0.0 (no gamma correction applied)
+    # Note: Implementation details in sonar_postprocessor_component.cpp
+    gamma: 0.0
