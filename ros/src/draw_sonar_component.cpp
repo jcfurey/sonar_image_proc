@@ -81,9 +81,14 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       RCLCPP_INFO(this->get_logger(), "Only drawing to max range %f", max_range_);
     }
 
-    // Create subscription
+    // Create subscription. Sonar image publishers (OceanSim, the real Oculus
+    // driver) use SensorDataQoS (best-effort); the plain-integer-depth overload
+    // used here previously built rclcpp's default QoS (reliable), which a
+    // best-effort publisher can never satisfy -- the subscription silently
+    // never connected. Match sonar_proc's SonarProcessingNode, which already
+    // subscribes to the same message type with SensorDataQoS() correctly.
     sub_sonar_image_ = this->create_subscription<marine_acoustic_msgs::msg::ProjectedSonarImage>(
-        "sonar_image", 10,
+        "sonar_image", rclcpp::SensorDataQoS(),
         std::bind(&DrawSonarComponent::sonarImageCallback, this, std::placeholders::_1));
 
     // Create publishers
