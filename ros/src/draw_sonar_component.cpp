@@ -52,6 +52,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     this->declare_parameter("log_scale", false);
     this->declare_parameter("min_db", -80.0);
     this->declare_parameter("max_db", 0.0);
+    this->declare_parameter("pixels_per_meter", 100.0);
 
     max_range_ = this->get_parameter("max_range").as_double();
     publish_old_api_ = this->get_parameter("publish_old").as_bool();
@@ -64,6 +65,11 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     log_scale_ = this->get_parameter("log_scale").as_bool();
     min_db_ = this->get_parameter("min_db").as_double();
     max_db_ = this->get_parameter("max_db").as_double();
+
+    // Set the pixels per meter scale factor for the sonar drawer
+    float pixels_per_meter = this->get_parameter("pixels_per_meter").as_double();
+    sonar_drawer_.setPixelsPerMeter(pixels_per_meter);
+    RCLCPP_INFO(this->get_logger(), "Using pixels_per_meter: %f", pixels_per_meter);
 
     // Configure sonar drawer overlay
     double range_spacing = this->get_parameter("range_spacing").as_double();

@@ -15,7 +15,7 @@ using sonar_image_proc::AbstractSonarInterface;
 static float deg2radf(float deg) { return deg * M_PI / 180.0; }
 static float rad2degf(float rad) { return rad * 180.0 / M_PI; }
 
-SonarDrawer::SonarDrawer() { ; }
+SonarDrawer::SonarDrawer() : pixels_per_meter_(100.0f) { ; }
 
 cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
                                         const SonarColorMap &colorMap,
@@ -54,7 +54,7 @@ cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
 cv::Mat SonarDrawer::remapRectSonarImage(const AbstractSonarInterface &ping,
                                          const cv::Mat &rectImage) {
   cv::Mat out;
-  const CachedMap::MapPair maps(_map(ping));
+  const CachedMap::MapPair maps(_map(ping, pixels_per_meter_));
   cv::remap(rectImage, out, maps.first, maps.second, cv::INTER_CUBIC,
             cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
@@ -98,9 +98,9 @@ bool SonarDrawer::Cached::isValid(const AbstractSonarInterface &ping) const {
 // ==== SonarDrawer::CachedMap ====
 
 SonarDrawer::CachedMap::MapPair SonarDrawer::CachedMap::operator()(
-    const AbstractSonarInterface &ping) {
+    const AbstractSonarInterface &ping, float pixelsPerMeter) {
   // _scMap[12] are mutable to break out of const
-  if (!isValid(ping)) create(ping);
+  if (!isValid(ping, pixelsPerMeter)) create(ping, pixelsPerMeter);
 
   return std::make_pair(_scMap1, _scMap2);
 }
@@ -108,20 +108,24 @@ SonarDrawer::CachedMap::MapPair SonarDrawer::CachedMap::operator()(
 //  **assumes** this structure for the rectImage:
 //   * It has nBearings cols and nRanges rows
 //
-void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping) {
+void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
+                                    float pixelsPerMeter) {
   cv::Mat newmap;
 
-  const int nRanges = ping.nRanges();
   const auto azimuthBounds = ping.azimuthBounds();
-
-  const int minusWidth = floor(nRanges * sin(azimuthBounds.first));
-  const int plusWidth = ceil(nRanges * sin(azimuthBounds.second));
+  const float maxRange = ping.maxRange();
+  
+  // Calculate image dimensions based on pixels per meter scale factor
+  // Height represents maxRange since origin is at the bottom
+  const int height = static_cast<int>(ceil(maxRange * pixelsPerMeter));
+  const int minusWidth = static_cast<int>(floor(height * sin(azimuthBounds.first)));
+  const int plusWidth = static_cast<int>(ceil(height * sin(azimuthBounds.second)));
   const int width = plusWidth - minusWidth;
 
   const int originx = abs(minusWidth);
 
-  const cv::Size imgSize(width, nRanges);
-  if ((width <= 0) || (nRanges <= 0)) return;
+  const cv::Size imgSize(width, height);
+  if ((width <= 0) || (height <= 0)) return;
 
   newmap.create(imgSize, CV_32FC2);
 
@@ -150,7 +154,27 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping) {
       const float range = sqrt(dx * dx + dy * dy);
       const float azimuth = atan2(dx, dy);
 
-      float xp = range;
+      // Map from pixel coordinates to data coordinates in the rect image
+      // rangeInPixels is distance from origin in output image (origin = range 0)
+      // Convert to actual range in meters, then to range bin index
+      const float rangeInPixels = range;  // Distance in pixels from origin
+      const float rangeInMeters = rangeInPixels / pixelsPerMeter;  // Convert to meters
+      
+      // Map range in meters to range bin index
+      // Sonar data spans from minRange to maxRange
+      const float minRange = ping.minRange();
+      const float maxRange = ping.maxRange();
+      const float rangeSpan = maxRange - minRange;
+      
+      // Clamp to valid range and convert to bin index
+      float xp;
+      if (rangeInMeters < minRange || rangeInMeters > maxRange) {
+        // Out of range - map to transparent/invalid
+        xp = -1.0f;  // Will be clamped/handled by remap
+      } else {
+        const float rangeFraction = (rangeInMeters - minRange) / rangeSpan;
+        xp = rangeFraction * ping.nRanges();
+      }
 
       //\todo This linear algorithm is not robust if the azimuths
       // are non-linear.   Should implement a real interpolation...
@@ -168,10 +192,14 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping) {
 
   _rangeBounds = ping.rangeBounds();
   _azimuthBounds = ping.azimuthBounds();
+  _pixelsPerMeter = pixelsPerMeter;
 }
 
-bool SonarDrawer::CachedMap::isValid(const AbstractSonarInterface &ping) const {
+bool SonarDrawer::CachedMap::isValid(const AbstractSonarInterface &ping, float pixelsPerMeter) const {
   if (_scMap1.empty() || _scMap2.empty()) return false;
+  
+  // Check if pixels per meter has changed
+  if (_pixelsPerMeter != pixelsPerMeter) return false;
 
   return Cached::isValid(ping);
 }

@@ -89,6 +89,11 @@ class SonarDrawer {
 
   SonarDrawer();
 
+  // Set the scale factor for output image (pixels per meter)
+  // Default is 100 pixels/meter
+  void setPixelsPerMeter(float ppm) { pixels_per_meter_ = ppm; }
+  float pixelsPerMeter() const { return pixels_per_meter_; }
+
   // Calls drawRectSonarImage followed by remapRectSonarImage inline
   // The intermediate rectangular image is not returned, if required,
   // use the two functions individually...
@@ -127,6 +132,7 @@ class SonarDrawer {
 
  private:
   OverlayConfig overlay_config_;
+  float pixels_per_meter_;
 
   // Utility class which can generate and store the two cv::Mats
   // required for the cv::remap() function
@@ -147,16 +153,17 @@ class SonarDrawer {
 
   struct CachedMap : public Cached {
    public:
-    CachedMap() : Cached() { ; }
+    CachedMap() : Cached(), _pixelsPerMeter(0.0f) { ; }
     typedef std::pair<cv::Mat, cv::Mat> MapPair;
 
-    MapPair operator()(const AbstractSonarInterface &ping);
+    MapPair operator()(const AbstractSonarInterface &ping, float pixelsPerMeter);
 
    private:
-    bool isValid(const AbstractSonarInterface &ping) const override;
-    void create(const AbstractSonarInterface &ping);
+    bool isValid(const AbstractSonarInterface &ping, float pixelsPerMeter) const;
+    void create(const AbstractSonarInterface &ping, float pixelsPerMeter);
 
     cv::Mat _scMap1, _scMap2;
+    float _pixelsPerMeter;
   } _map;
 
   struct CachedOverlay : public Cached {

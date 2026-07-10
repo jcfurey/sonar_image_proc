@@ -69,6 +69,12 @@ def generate_launch_description():
         description='Maximum range to display (0.0 for auto)'
     )
     
+    pixels_per_meter_arg = DeclareLaunchArgument(
+        'pixels_per_meter',
+        default_value='100.0',
+        description='Output image scale factor (pixels per meter). Higher values = larger images. Default: 100.0'
+    )
+    
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
     sonar_topic = LaunchConfiguration('sonar_topic')
@@ -78,6 +84,7 @@ def generate_launch_description():
     log_scale = LaunchConfiguration('log_scale')
     publish_histogram = LaunchConfiguration('publish_histogram')
     max_range = LaunchConfiguration('max_range')
+    pixels_per_meter = LaunchConfiguration('pixels_per_meter')
     
     # Helper to conditionally load params from file or use inline
     def get_draw_sonar_params():
@@ -92,6 +99,7 @@ def generate_launch_description():
                 'color_map': color_map,
                 'log_scale': log_scale,
                 'max_range': max_range,
+                'pixels_per_meter': pixels_per_meter,
                 'publish_old': False,
                 'publish_timing': True,
                 'range_spacing': 10.0,
@@ -150,6 +158,7 @@ def generate_launch_description():
         log_scale_arg,
         publish_histogram_arg,
         max_range_arg,
+        pixels_per_meter_arg,
         component_container,
         draw_sonar_node,
     ])
