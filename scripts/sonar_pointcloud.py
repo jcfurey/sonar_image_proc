@@ -27,59 +27,49 @@ from sonar_image_proc.sonar_msg_metadata import SonarImageMetadata
 # ======================================================================================
 
 def make_geometry(sonar_msg_metadata: SonarImageMetadata, elevations) -> np.ndarray:
+    """Per-elevation point geometry, laid out to match the image data
+    (row-major: index = range_bin * num_angles + beam).
 
-    idxs = np.arange(
-        0,
-        sonar_msg_metadata.num_angles * sonar_msg_metadata.num_ranges,
-    )
-    idxs = idxs.reshape(
-        sonar_msg_metadata.num_ranges,
-        sonar_msg_metadata.num_angles,
-    ).flatten(order="F")
+    Frame convention follows the message's own beam_directions
+    (x = elevation, y = -sin(azimuth), z = cos(azimuth) — the driver publishes
+    beam.y = -sin(az)); SonarImageMetadata.azimuths recovers the bearing
+    convention via atan2(-y, ...), so y must be negated here. The previous
+    version used +sin(az), which mirrored the cloud left-right relative to
+    the driver's declared geometry and the sonar_proc cloud.
 
+    Returns float32 array of shape (num_elevations, num_ranges * num_angles, 3).
+    """
     ces = np.cos(elevations)
     ses = np.sin(elevations)
     cas = np.cos(sonar_msg_metadata.azimuths)
     sas = np.sin(sonar_msg_metadata.azimuths)
 
-    new_shape = (
-        len(elevations),
-        sonar_msg_metadata.num_ranges * sonar_msg_metadata.num_angles,
-        3,
+    # (n_elev, n_ranges, n_angles) — image layout, range-major
+    r = sonar_msg_metadata.ranges[np.newaxis, :, np.newaxis]
+    x = np.broadcast_to(
+        (sonar_msg_metadata.ranges[np.newaxis, :] * ses[:, np.newaxis])[:, :, np.newaxis],
+        (len(elevations), sonar_msg_metadata.num_ranges, sonar_msg_metadata.num_angles),
     )
+    y = r * ces[:, np.newaxis, np.newaxis] * -sas[np.newaxis, np.newaxis, :]
+    z = r * ces[:, np.newaxis, np.newaxis] * cas[np.newaxis, np.newaxis, :]
 
-    points = np.zeros(new_shape)
-
-    x_temp = np.tile(
-        sonar_msg_metadata.ranges[np.newaxis, :] * ses[:, np.newaxis],
-        reps=sonar_msg_metadata.num_angles,
-    ).flatten()
-
-    y_temp = (
-        sonar_msg_metadata.ranges[np.newaxis, np.newaxis, :]
-        * ces[:, np.newaxis, np.newaxis]
-        * sas[np.newaxis, :, np.newaxis]
-    ).flatten()
-
-    z_temp = (
-        sonar_msg_metadata.ranges[np.newaxis, np.newaxis, :]
-        * ces[:, np.newaxis, np.newaxis]
-        * cas[np.newaxis, :, np.newaxis]
-    ).flatten()
-
-    points[:, idxs, :] = np.stack([x_temp, y_temp, z_temp], axis=1).reshape(new_shape)
-
-    return points
+    points = np.stack([x, y, z], axis=-1).reshape(len(elevations), -1, 3)
+    return np.ascontiguousarray(points, dtype=np.float32)
 
 
 def make_color_lookup() -> np.ndarray:
-
-    color_lookup = np.zeros((256, 4), dtype=np.float32)
+    """Inferno colormap with intensity-proportional alpha, packed as
+    0xAARRGGBB uint32 (the PCL 'rgba' convention RViz and Foxglove read)."""
+    color_lookup = np.zeros(256, dtype=np.uint32)
 
     for aa in range(256):
         r, g, b, _ = cm.inferno(aa)
-        alpha = aa / 256.0
-        color_lookup[aa, :] = [r, g, b, alpha]
+        color_lookup[aa] = (
+            (aa << 24)                     # alpha = intensity
+            | (int(255 * r) << 16)
+            | (int(255 * g) << 8)
+            | int(255 * b)
+        )
 
     return color_lookup
 
@@ -89,6 +79,10 @@ def make_color_lookup() -> np.ndarray:
 # ======================================================================================
 
 class SonarPointcloud(Node):
+
+    POINT_DTYPE = np.dtype(
+        [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("rgba", "<u4")]
+    )
 
     def __init__(self):
 
@@ -120,6 +114,9 @@ class SonarPointcloud(Node):
         self.declare_parameter("publish_all_points", False)
         self.declare_parameter("cmin", 0.74)
         self.declare_parameter("threshold", 0.0)
+        # skip points whose colormap alpha would be 0 (normalized intensity
+        # <= cmin) — they render invisible but dominate the message size
+        self.declare_parameter("drop_invisible", True)
         self.declare_parameter("elev_steps", 2)
         self.declare_parameter("min_elev_deg", -10.0)
         self.declare_parameter("max_elev_deg", 10.0)
@@ -147,6 +144,7 @@ class SonarPointcloud(Node):
 
         self.cmin = float(self.get_parameter("cmin").value)
         self.threshold = float(self.get_parameter("threshold").value)
+        self.drop_invisible = bool(self.get_parameter("drop_invisible").value)
 
         elev_steps = int(self.get_parameter("elev_steps").value)
         min_elev = np.radians(
@@ -176,6 +174,9 @@ class SonarPointcloud(Node):
                 elif param.name == "threshold":
                     self.threshold = float(param.value)
 
+                elif param.name == "drop_invisible":
+                    self.drop_invisible = bool(param.value)
+
                 elif param.name in [
                     "elev_steps",
                     "min_elev_deg",
@@ -197,21 +198,22 @@ class SonarPointcloud(Node):
     # Intensity Processing
     # ==================================================================================
 
-    def normalize_intensity_array(self, image: SonarImageData):
+    def _image_dtype(self, image: SonarImageData):
 
         if image.dtype == image.DTYPE_UINT8:
-            data_type = np.uint8
-        elif image.dtype == image.DTYPE_UINT32:
-            data_type = np.uint32
-        else:
-            raise Exception("Only 8 bit and 32 bit data supported")
-
-        intensities = np.frombuffer(image.data, dtype=data_type)
-        new_intensities = intensities.astype(np.float32)
-
-        return np.log(np.maximum(1, new_intensities)) / np.log(
-            np.iinfo(data_type).max
+            return np.uint8
+        if image.dtype == image.DTYPE_UINT16:
+            return np.uint16
+        if image.dtype == image.DTYPE_UINT32:
+            return np.uint32
+        # don't raise: an exception here propagates out of the callback and
+        # kills the node (respawn defaults to False in the bringup launch)
+        self.get_logger().error(
+            f"Unsupported sonar image dtype {image.dtype} "
+            "(only uint8/uint16/uint32 supported)",
+            throttle_duration_sec=5.0,
         )
+        return None
 
     # ==================================================================================
     # Callback
@@ -238,68 +240,72 @@ class SonarPointcloud(Node):
                     self.elevations
                 )
 
-            normalized_intensities = self.normalize_intensity_array(
-                sonar_image_msg.image
-            )
-
-            if self.publish_all_points:
-                selected_intensities = normalized_intensities
-                geometry = self.geometry
-            else:
-                pos_idx = np.where(normalized_intensities > self.threshold)
-                selected_intensities = normalized_intensities[pos_idx]
-                geometry = self.geometry[:, pos_idx[0]]
-
-            if len(selected_intensities) == 0:
+            data_type = self._image_dtype(sonar_image_msg.image)
+            if data_type is None:
                 return
 
-            colors = (selected_intensities - self.cmin) / (1.0 - self.cmin)
-            c_clipped = np.clip(colors, 0.0, 1.0)
-            c_uint8 = (255 * c_clipped).astype(np.uint8)
+            raw = np.frombuffer(sonar_image_msg.image.data, dtype=data_type)
+            dtype_max = np.iinfo(data_type).max
+            log_max = np.log(dtype_max)
 
-            npts = len(selected_intensities)
+            # Selection happens in the raw domain (log is monotonic:
+            # log(raw)/log(max) > t  <=>  raw > max**t), so the log runs only
+            # over the selected bins. Points with normalized intensity <= cmin
+            # get color index 0 => alpha 0: invisible, so by default they are
+            # not worth publishing at all (this is the dominant bandwidth cost
+            # with a low threshold).
+            if self.publish_all_points:
+                norm = np.log(np.maximum(1, raw).astype(np.float32)) / log_max
+                sel_idx = None
+                npts = len(raw)
+            else:
+                cutoff_norm = self.threshold
+                if self.drop_invisible:
+                    cutoff_norm = max(cutoff_norm, self.cmin)
+                raw_cutoff = dtype_max ** cutoff_norm
+                sel_idx = np.flatnonzero(raw > raw_cutoff)
+                if len(sel_idx) == 0:
+                    return
+                norm = np.log(raw[sel_idx].astype(np.float32)) / log_max
+                npts = len(sel_idx)
 
-            output_points = np.zeros(
-                (len(self.elevations) * npts, 7),
-                dtype=np.float32,
-            )
+            colors = (norm - self.cmin) / (1.0 - self.cmin)
+            c_uint8 = (255 * np.clip(colors, 0.0, 1.0)).astype(np.uint8)
+            rgba = self.color_lookup[c_uint8]
 
-            color_vals = self.color_lookup[c_uint8]
+            geometry = self.geometry if sel_idx is None else self.geometry[:, sel_idx, :]
 
-            elev_points = np.empty((npts, 7), dtype=np.float32)
-            elev_points[:, 3:] = color_vals
-
-            for i in range(len(self.elevations)):
-                elev_points[:, 0:3] = geometry[i, :, :]
-                start = i * npts
-                output_points[start:start + npts, :] = elev_points
+            n_elev = len(self.elevations)
+            out = np.empty(n_elev * npts, dtype=self.POINT_DTYPE)
+            xyz = geometry.reshape(-1, 3)
+            out["x"] = xyz[:, 0]
+            out["y"] = xyz[:, 1]
+            out["z"] = xyz[:, 2]
+            out["rgba"] = np.tile(rgba, n_elev)
 
             fields = [
                 PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
                 PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
                 PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-                PointField(name="r", offset=12, datatype=PointField.FLOAT32, count=1),
-                PointField(name="g", offset=16, datatype=PointField.FLOAT32, count=1),
-                PointField(name="b", offset=20, datatype=PointField.FLOAT32, count=1),
-                PointField(name="a", offset=24, datatype=PointField.FLOAT32, count=1),
+                PointField(name="rgba", offset=12, datatype=PointField.UINT32, count=1),
             ]
 
             cloud_msg = PointCloud2(
                 header=header,
                 height=1,
-                width=len(output_points),
+                width=len(out),
                 is_dense=True,
                 is_bigendian=False,
                 fields=fields,
-                point_step=7 * 4,
-                row_step=7 * 4 * len(output_points),
-                data=output_points.tobytes(),
+                point_step=16,
+                row_step=16 * len(out),
+                data=out.tobytes(),
             )
 
             self.publisher.publish(cloud_msg)
 
             self.get_logger().debug(
-                f"Published {len(output_points)} pts "
+                f"Published {len(out)} pts "
                 f"in {time.time() - begin_time:.3f}s"
             )
 
