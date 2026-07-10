@@ -209,8 +209,16 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
   }
 
   void DrawSonarComponent::setColorMap(const std::string &color_map_name) {
-    // TBD actually implement the parameter processing here...
-    color_map_.reset(new InfernoSaturationColorMap());
+    if (color_map_name == "inferno_saturation") {
+      color_map_.reset(new InfernoSaturationColorMap());
+    } else if (color_map_name == "mitchell") {
+      color_map_.reset(new sonar_image_proc::MitchellColorMap());
+    } else {
+      if (color_map_name != "inferno") {
+        RCLCPP_WARN(this->get_logger(), "Unknown color_map '%s', using 'inferno'", color_map_name.c_str());
+      }
+      color_map_.reset(new InfernoColorMap());
+    }
   }
 
 }  // namespace draw_sonar

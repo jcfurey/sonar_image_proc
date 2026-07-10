@@ -4,7 +4,6 @@
 
 #include "sonar_image_proc/sonar_postprocessor_component.hpp"
 
-#include <sstream>
 #include "sonar_image_proc/sonar_image_msg_interface.h"
 
 namespace sonar_postprocessor {
@@ -52,33 +51,27 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
     out.image.data.reserve(interface.ranges().size() *
                            interface.azimuths().size());
 
-    double logmin, logmax;
-
     for (unsigned int r_idx = 0; r_idx < interface.nRanges(); ++r_idx) {
       for (unsigned int a_idx = 0; a_idx < interface.nAzimuth(); ++a_idx) {
         sonar_image_proc::AzimuthRangeIndices idx(a_idx, r_idx);
 
-        // Avoid log(0)
+        // Avoid log(0); normalize to [0, 1] in log space
         auto intensity = interface.intensity_uint32(idx);
         auto v = log(std::max((uint)1, intensity)) / log(UINT32_MAX);
 
-        if ((r_idx == 0) && (a_idx == 0)) {
-          logmin = v;
-          logmax = v;
-        } else {
-          logmin = std::min(v, logmin);
-          logmax = std::max(v, logmax);
+        // Apply gain then clamp
+        v *= gain_;
+        v = std::min(1.0, std::max(0.0, v));
+
+        // Apply gamma correction (0 = disabled)
+        if (gamma_ > 0.0) {
+          v = pow(v, gamma_);
         }
 
-        const float vmax = 1.0, threshold = 0.74;
-
-        v = (v - threshold) / (vmax - threshold);
-        v = std::min(1.0, std::max(0.0, v));
         out.image.data.push_back(UINT8_MAX * v);
       }
     }
 
-    float dr = exp(logmax - logmin);
     pub_sonar_image_->publish(out);
   }
 
