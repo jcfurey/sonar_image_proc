@@ -140,6 +140,26 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     }
 
     SonarImageMsgInterface interface(msg);
+    // A data buffer shorter than ranges*bearings*elem was read out of bounds
+    // by every consumer below (the CPU index() lookups and the GPU H2D copy
+    // alike) — validate once, before any path touches it.
+    {
+      size_t elem = 0;
+      if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
+      else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
+      else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
+      const size_t need = static_cast<size_t>(interface.nRanges()) *
+                          static_cast<size_t>(interface.nBearings()) * elem;
+      if (elem > 0 && msg->image.data.size() < need) {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: %zu data bytes < %zu required "
+            "(%d ranges x %d bearings)",
+            msg->image.data.size(), need, interface.nRanges(),
+            interface.nBearings());
+        return;
+      }
+    }
     if (log_scale_) {
       interface.do_log_scale(min_db_, max_db_);
     }
@@ -265,16 +285,16 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       color_map_.reset(new InfernoColorMap());
     }
 
-    // GPU LUT: the active colormap evaluated per uint8 intensity — exactly
-    // the values the CPU lookup_cv8uc3 produces (all three maps are pure
-    // functions of the intensity byte, saturate_cast rounding included)
+    // GPU LUT: the active colormap evaluated per uint8 intensity, matching
+    // the CPU lookup_cv8uc3 arithmetic (truncating float->uchar conversion,
+    // NOT saturate_cast rounding — the CPU maps convert implicitly)
     lut_valid_ = false;
     if (color_map_name == "mitchell") {
       for (int i = 0; i < 256; ++i) {
         const float f = static_cast<float>(i) / UINT8_MAX;
-        lut_[3 * i + 0] = cv::saturate_cast<uchar>(1 - f);
-        lut_[3 * i + 1] = cv::saturate_cast<uchar>(f);
-        lut_[3 * i + 2] = cv::saturate_cast<uchar>(f);
+        lut_[3 * i + 0] = static_cast<uchar>((1.0f - f) * 255.0f);
+        lut_[3 * i + 1] = static_cast<uchar>(f * 255.0f);
+        lut_[3 * i + 2] = static_cast<uchar>(f * 255.0f);
       }
       lut_valid_ = true;
     } else {  // inferno / inferno_saturation

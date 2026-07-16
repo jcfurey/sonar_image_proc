@@ -52,7 +52,10 @@ struct MitchellColorMap : public SonarColorMap {
   cv::Vec3b lookup_cv8uc3(const AbstractSonarInterface &ping,
                           const AzimuthRangeIndices &loc) const override {
     const auto i = ping.intensity_float(loc);
-    return cv::Vec3b(1 - i, i, i);
+    // scale to the byte range like the base class — without the *255 the
+    // implicit float->uchar conversion truncated every channel to 0/1
+    // (an all-black image)
+    return cv::Vec3b((1 - i) * 255, i * 255, i * 255);
   }
 };
 
