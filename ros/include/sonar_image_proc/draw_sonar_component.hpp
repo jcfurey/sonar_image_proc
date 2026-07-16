@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
 #include "rclcpp/rclcpp.hpp"
@@ -50,6 +51,14 @@ class DrawSonarComponent : public rclcpp::Node {
   bool log_scale_;
 
   std::unique_ptr<sonar_image_proc::SonarColorMap> color_map_;
+
+  // CUDA draw path (lib/GpuSonarDraw.cu): colormap LUT + bicubic fan remap
+  // on the GPU for uint8 pings; visually equivalent, CPU path is the
+  // fallback. lut_ is the active colormap evaluated per intensity — valid
+  // only for maps that are pure functions of the uint8 intensity.
+  bool use_gpu_{false};
+  bool lut_valid_{false};
+  std::array<uint8_t, 256 * 3> lut_{};
 };
 
 }  // namespace draw_sonar

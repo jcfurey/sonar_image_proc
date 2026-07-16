@@ -17,6 +17,9 @@
 #include "sonar_image_proc/HistogramGenerator.h"
 #include "sonar_image_proc/SonarDrawer.h"
 #include "sonar_image_proc/sonar_image_msg_interface.h"
+#ifdef SONAR_IMAGE_PROC_WITH_CUDA
+#include "sonar_image_proc/GpuSonarDraw.h"
+#endif
 
 // Subscribes to sonar message topic, draws using opencv then publishes result
 
@@ -53,8 +56,13 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     this->declare_parameter("min_db", -80.0);
     this->declare_parameter("max_db", 0.0);
     this->declare_parameter("pixels_per_meter", 100.0);
+    // draw on the GPU (colormap LUT + bicubic fan remap, visually equivalent;
+    // see lib/GpuSonarDraw.cu). CPU path is the fallback for non-uint8 pings,
+    // non-LUT colormaps, or any device failure.
+    this->declare_parameter("use_gpu", false);
 
     max_range_ = this->get_parameter("max_range").as_double();
+    use_gpu_ = this->get_parameter("use_gpu").as_bool();
     publish_old_api_ = this->get_parameter("publish_old").as_bool();
     publish_timing_ = this->get_parameter("publish_timing").as_bool();
     publish_histogram_ = this->get_parameter("publish_histogram").as_bool();
@@ -170,7 +178,37 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     {
       auto begin = std::chrono::steady_clock::now();
 
-      cv::Mat rect_mat = sonar_drawer_.drawRectSonarImage(interface, *color_map_);
+      cv::Mat rect_mat;
+      cv::Mat sonar_mat;
+      bool gpu_drawn = false;
+#ifdef SONAR_IMAGE_PROC_WITH_CUDA
+      // GPU draw: one shot produces both the rect image and the fan (see
+      // GpuSonarDraw.h — LUT stage exact, remap visually equivalent). Any
+      // failure or unsupported input falls through to the CPU path below.
+      if (use_gpu_ && lut_valid_ &&
+          msg->image.dtype ==
+              marine_acoustic_msgs::msg::SonarImageData::DTYPE_UINT8 &&
+          sonar_image_proc::gpu::available()) {
+        const int n_ranges = interface.nRanges();
+        const int n_bearings = interface.nBearings();
+        const auto az = interface.azimuthBounds();
+        const auto geom = sonar_image_proc::gpu::fanGeometry(
+            interface.maxRange(), az.first, az.second,
+            sonar_drawer_.pixelsPerMeter());
+        if (n_ranges > 0 && n_bearings > 0 && geom.width > 0 &&
+            geom.height > 0) {
+          rect_mat.create(cv::Size(n_ranges, n_bearings), CV_8UC3);
+          sonar_mat.create(cv::Size(geom.width, geom.height), CV_8UC3);
+          gpu_drawn = sonar_image_proc::gpu::drawSonar(
+              msg->image.data.data(), n_ranges, n_bearings,
+              interface.minRange(), interface.maxRange(), az.first, az.second,
+              interface.nAzimuth(), sonar_drawer_.pixelsPerMeter(),
+              lut_.data(), rect_mat.data, geom, sonar_mat.data);
+        }
+      }
+#endif
+      if (!gpu_drawn)
+        rect_mat = sonar_drawer_.drawRectSonarImage(interface, *color_map_);
 
       // Rotate rectangular image to the more expected format where zero range
       // is at the bottom of the image, with negative azimuth to the right
@@ -182,7 +220,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       rect_elapsed = std::chrono::steady_clock::now() - begin;
       begin = std::chrono::steady_clock::now();
 
-      cv::Mat sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
+      if (!gpu_drawn)
+        sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
       cvBridgeAndPublish(msg, sonar_mat, pub_);
 
       if (osd_pub_->get_subscription_count() > 0) {
@@ -224,6 +263,31 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         RCLCPP_WARN(this->get_logger(), "Unknown color_map '%s', using 'inferno'", color_map_name.c_str());
       }
       color_map_.reset(new InfernoColorMap());
+    }
+
+    // GPU LUT: the active colormap evaluated per uint8 intensity — exactly
+    // the values the CPU lookup_cv8uc3 produces (all three maps are pure
+    // functions of the intensity byte, saturate_cast rounding included)
+    lut_valid_ = false;
+    if (color_map_name == "mitchell") {
+      for (int i = 0; i < 256; ++i) {
+        const float f = static_cast<float>(i) / UINT8_MAX;
+        lut_[3 * i + 0] = cv::saturate_cast<uchar>(1 - f);
+        lut_[3 * i + 1] = cv::saturate_cast<uchar>(f);
+        lut_[3 * i + 2] = cv::saturate_cast<uchar>(f);
+      }
+      lut_valid_ = true;
+    } else {  // inferno / inferno_saturation
+      for (int i = 0; i < 256; ++i)
+        for (int c = 0; c < 3; ++c)
+          lut_[3 * i + c] = cv::saturate_cast<uchar>(
+              InfernoColorMap::_inferno_data_uint8[i][c]);
+      if (color_map_name == "inferno_saturation") {
+        lut_[3 * 255 + 0] = 0;
+        lut_[3 * 255 + 1] = 255;
+        lut_[3 * 255 + 2] = 0;
+      }
+      lut_valid_ = true;
     }
   }
 

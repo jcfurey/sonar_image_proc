@@ -2,12 +2,48 @@ cmake_minimum_required(VERSION 3.8)
 project(sonar_image_proc)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  # C++ only — nvcc does not understand these flags directly
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
 endif()
 
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
+endif()
+
+# Optional CUDA draw path (lib/GpuSonarDraw.cu): colormap LUT + bicubic fan
+# remap on the GPU. The CPU path remains the fallback; without a CUDA
+# toolchain the build is CPU-only exactly as before.
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES 86-real 86-virtual)  # RTX 3090
+  endif()
+  # stale-cache self-heal (see sonar_slam_cpp/CMakeLists.txt for rationale)
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+    set(_cuda_arch_floor 75)
+  else()
+    set(_cuda_arch_floor 0)
+  endif()
+  set(_cuda_arch_ok TRUE)
+  foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    string(REGEX MATCH "^[0-9]+" _an "${_a}")
+    if(_an AND _an LESS _cuda_arch_floor)
+      set(_cuda_arch_ok FALSE)
+    endif()
+  endforeach()
+  if(NOT _cuda_arch_ok)
+    message(WARNING "sonar_image_proc: cached CMAKE_CUDA_ARCHITECTURES "
+      "'${CMAKE_CUDA_ARCHITECTURES}' is below the sm_${_cuda_arch_floor} floor "
+      "— resetting to 86.")
+    set(CMAKE_CUDA_ARCHITECTURES 86-real 86-virtual CACHE STRING "" FORCE)
+  endif()
+  find_package(CUDAToolkit REQUIRED)
+  message(STATUS "sonar_image_proc: CUDA draw enabled (arch ${CMAKE_CUDA_ARCHITECTURES})")
+else()
+  message(STATUS "sonar_image_proc: no CUDA compiler found, building CPU-only")
 endif()
 
 # find dependencies
@@ -54,6 +90,13 @@ ament_target_dependencies(sonar_image_proc
   marine_acoustic_msgs
   cv_bridge
 )
+
+if(CMAKE_CUDA_COMPILER)
+  target_sources(sonar_image_proc PRIVATE lib/GpuSonarDraw.cu)
+  # PUBLIC: the components library keys its GPU dispatch off this define
+  target_compile_definitions(sonar_image_proc PUBLIC SONAR_IMAGE_PROC_WITH_CUDA)
+  target_link_libraries(sonar_image_proc CUDA::cudart_static)
+endif()
 
 # Component library containing ROS 2 components (formerly nodelets)
 add_library(sonar_image_proc_components SHARED
