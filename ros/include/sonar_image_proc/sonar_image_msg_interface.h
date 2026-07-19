@@ -33,7 +33,9 @@ struct SonarImageMsgInterface
         // TODO(lindzey): Look into whether averaging would be better, or if we
         //     should create an array of verticalTanSquared.
         // TODO(lindzey): Handle empty-array case.
-        std::pow(std::tan(ping->ping_info.tx_beamwidths[0] / 2.0), 2);
+        (ping->ping_info.tx_beamwidths.empty()
+             ? 0.0f
+             : std::pow(std::tan(ping->ping_info.tx_beamwidths[0] / 2.0), 2));
 
     for (const auto pt : ping->beam_directions) {
       auto az = atan2(-1 * pt.y, pt.z);
@@ -223,13 +225,20 @@ struct SonarImageMsgInterface
 
   float intensity_float_log(const AzimuthRangeIndices &idx) const {
     const auto intensity = read_uint32(idx);
-    const auto v =
-        log(static_cast<float>(std::max((uint)1, intensity)) / UINT32_MAX) *
-        10;  // dbm
+    // dB relative to full scale, base-10 (the class's dB convention — the
+    // docstring's worked examples are 10*log10, not natural log). Using log10
+    // makes the min_db/max_db window a true-decibel range.
+    const float v =
+        log10(static_cast<float>(std::max((uint)1, intensity)) / UINT32_MAX) *
+        10;  // dB
 
-    const auto min_db = (min_db_ == 0 ? log(1.0 / UINT32_MAX) * 10 : min_db_);
+    const float full_min_db = log10(1.0 / UINT32_MAX) * 10;  // full-scale bottom
+    const float min_db = (min_db_ == 0 ? full_min_db : min_db_);
+    // Full-range mode (min_db == max_db == 0) leaves range_db_ == 0; fall back
+    // to the full-scale span (0 dB top) instead of dividing by zero.
+    const float span = (range_db_ != 0 ? range_db_ : -full_min_db);
 
-    return std::min(1.0, std::max(0.0, (v - min_db) / range_db_));
+    return std::min(1.0f, std::max(0.0f, (v - min_db) / span));
   }
 
   bool do_log_scale_;

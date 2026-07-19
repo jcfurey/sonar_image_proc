@@ -42,6 +42,21 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
       return;
     }
 
+    // Validate the data buffer covers ranges*azimuths*4 bytes before the
+    // intensity_uint32() reads below (mirror of draw_sonar_component's guard):
+    // a short/malformed UINT32 buffer is otherwise read out of bounds.
+    {
+      const size_t need = static_cast<size_t>(interface.nRanges()) *
+                          static_cast<size_t>(interface.nAzimuth()) * 4;
+      if (msg->image.data.size() < need) {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: %zu data bytes < %zu required",
+            msg->image.data.size(), need);
+        return;
+      }
+    }
+
     // Expect this will copy
     marine_acoustic_msgs::msg::ProjectedSonarImage out = *msg;
 

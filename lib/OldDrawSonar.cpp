@@ -127,7 +127,7 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
       cv::ellipse(out, origin, cv::Size(rad, rad), 0, begin * 180 / M_PI,
                   end * 180 / M_PI,
                   colorMap.lookup_cv8uc3(
-                      ping, AzimuthRangeIndices(angles[b].center, range)),
+                      ping, AzimuthRangeIndices(b, r)),
                   binThickness);
     }
   }

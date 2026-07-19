@@ -193,6 +193,24 @@ int main(int argc, char **argv) {
           serialization.deserialize_message(&serialized_msg, msg.get());
 
           sonar_image_proc::SonarImageMsgInterface interface(msg);
+
+          // Validate the data buffer covers ranges*bearings*elem before drawing;
+          // a truncated/malformed ping is otherwise read out of bounds.
+          {
+            size_t elem = 0;
+            if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
+            else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
+            else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
+            const size_t need = static_cast<size_t>(interface.nRanges()) *
+                                static_cast<size_t>(interface.nBearings()) * elem;
+            if (elem == 0 || msg->image.data.size() < need) {
+              std::cerr << "Skipping malformed sonar image ("
+                        << msg->image.data.size() << " bytes < " << need
+                        << " required)" << std::endl;
+              continue;
+            }
+          }
+
           if (vm["logscale"].as<bool>()) {
             interface.do_log_scale(vm["min-db"].as<float>(),
                                    vm["max-db"].as<float>());

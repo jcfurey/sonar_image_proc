@@ -103,15 +103,19 @@ struct AbstractSonarInterface {
   virtual float intensity_float(const AzimuthRangeIndices &idx) const = 0;
 
   virtual uint8_t intensity_uint8(const AzimuthRangeIndices &idx) const {
-    return INT8_MAX * intensity_float(idx);
+    return UINT8_MAX * intensity_float(idx);
   }
 
   virtual uint16_t intensity_uint16(const AzimuthRangeIndices &idx) const {
-    return INT16_MAX * intensity_float(idx);
+    return UINT16_MAX * intensity_float(idx);
   }
 
   virtual uint32_t intensity_uint32(const AzimuthRangeIndices &idx) const {
-    return INT32_MAX * intensity_float(idx);
+    // double, not float: UINT32_MAX rounds UP to 2^32 as a float, so a
+    // saturated intensity of exactly 1.0f would overflow the uint32 return
+    // (float->uint32 out-of-range conversion is UB)
+    return static_cast<uint32_t>(UINT32_MAX *
+                                 static_cast<double>(intensity_float(idx)));
   }
 
   // Trivial wrappers.  These will be deprecated eventually

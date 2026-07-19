@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.18)
 project(sonar_image_proc)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -46,23 +46,13 @@ else()
   message(STATUS "sonar_image_proc: no CUDA compiler found, building CPU-only")
 endif()
 
-# find dependencies
-find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(rclcpp_components REQUIRED)
-find_package(rclpy REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(marine_acoustic_msgs REQUIRED)
-find_package(cv_bridge REQUIRED)
-find_package(image_transport REQUIRED)
-find_package(rosbag2_cpp REQUIRED)
+# ament_auto resolves the ROS/ament build deps from package.xml
+# (ament_cmake_python, rclcpp, rclcpp_components, rclpy, sensor_msgs, std_msgs,
+#  marine_acoustic_msgs, cv_bridge, image_transport, rosbag2_cpp, rosbag2_storage).
+find_package(ament_cmake_auto REQUIRED)
+ament_auto_find_build_dependencies()
 
-find_package(Boost COMPONENTS filesystem system program_options REQUIRED)
-list(APPEND OPENCV_COMPONENTS core highgui imgproc)
-find_package(OpenCV COMPONENTS ${OPENCV_COMPONENTS} REQUIRED)
-
+# System (non-ament) deps found explicitly
 find_package(Boost COMPONENTS filesystem system program_options REQUIRED)
 list(APPEND OPENCV_COMPONENTS core highgui imgproc)
 find_package(OpenCV COMPONENTS ${OPENCV_COMPONENTS} REQUIRED)
@@ -132,10 +122,8 @@ ament_target_dependencies(sonar_postprocessor_node
 )
 
 # bag2sonar tool for offline processing
-find_package(Boost REQUIRED COMPONENTS program_options)
-
 add_executable(bag2sonar ros/tools/bag2sonar.cpp)
-target_link_libraries(bag2sonar 
+target_link_libraries(bag2sonar
   sonar_image_proc
   Boost::program_options
 )
@@ -204,4 +192,4 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-ament_package()
+ament_auto_package()

@@ -293,7 +293,7 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
   }
 
   // And one arc at max range
-  cv::ellipse(_overlay, origin, sz, 0, rad2degf(bearingToImage(minAzimuth)),
+  cv::ellipse(_overlay, origin, cv::Size(sz.height, sz.height), 0, rad2degf(bearingToImage(minAzimuth)),
               rad2degf(bearingToImage(maxAzimuth)), lineColor,
               config.lineThickness());
 

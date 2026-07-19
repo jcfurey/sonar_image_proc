@@ -68,7 +68,7 @@ std::vector<unsigned int> HistogramGenerator::GenerateUint32(
       // std::cerr << "val = " << val << "; l = " << l << "; idx = " << idx <<
       // std::endl;
 
-      if ((idx < 0) || (idx > result.size())) continue;
+      if (idx >= result.size()) continue;
       result[idx]++;
     }
   }
