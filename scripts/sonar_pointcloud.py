@@ -223,7 +223,7 @@ class SonarPointcloud(Node):
 
         with self.lock:
 
-            begin_time = time.time()
+            begin_time = self.get_clock().now()
 
             header = sonar_image_msg.header
             if self.frame_id:
@@ -304,9 +304,10 @@ class SonarPointcloud(Node):
 
             self.publisher.publish(cloud_msg)
 
+            elapsed = (self.get_clock().now() - begin_time).nanoseconds / 1e9
             self.get_logger().debug(
                 f"Published {len(out)} pts "
-                f"in {time.time() - begin_time:.3f}s"
+                f"in {elapsed:.3f}s"
             )
 
 

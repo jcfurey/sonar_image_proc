@@ -164,10 +164,10 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       interface.do_log_scale(min_db_, max_db_);
     }
 
-    std::chrono::duration<double> old_api_elapsed, rect_elapsed, map_elapsed, histogram_elapsed;
+    rclcpp::Duration old_api_elapsed(0, 0), rect_elapsed(0, 0), map_elapsed(0, 0), histogram_elapsed(0, 0);
 
     if (publish_old_api_) {
-      auto begin = std::chrono::steady_clock::now();
+      auto begin = this->get_clock()->now();
 
       // Used to be a configurable parameter, but now only meaningful
       // in the deprecated API
@@ -181,22 +181,22 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
 
       cvBridgeAndPublish(msg, mat, old_pub_);
 
-      old_api_elapsed = std::chrono::steady_clock::now() - begin;
+      old_api_elapsed = this->get_clock()->now() - begin;
     }
 
     if (publish_histogram_) {
-      auto begin = std::chrono::steady_clock::now();
+      auto begin = this->get_clock()->now();
 
       auto histogram_out = UInt32MultiArray();
       histogram_out.data = HistogramGenerator::Generate(interface);
 
       histogram_pub_->publish(histogram_out);
 
-      histogram_elapsed = std::chrono::steady_clock::now() - begin;
+      histogram_elapsed = this->get_clock()->now() - begin;
     }
 
     {
-      auto begin = std::chrono::steady_clock::now();
+      auto begin = this->get_clock()->now();
 
       cv::Mat rect_mat;
       cv::Mat sonar_mat;
@@ -237,8 +237,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
       cvBridgeAndPublish(msg, rotated_rect, rect_pub_);
 
-      rect_elapsed = std::chrono::steady_clock::now() - begin;
-      begin = std::chrono::steady_clock::now();
+      rect_elapsed = this->get_clock()->now() - begin;
+      begin = this->get_clock()->now();
 
       if (!gpu_drawn)
         sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
@@ -249,20 +249,20 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         cvBridgeAndPublish(msg, osd_mat, osd_pub_);
       }
 
-      map_elapsed = std::chrono::steady_clock::now() - begin;
+      map_elapsed = this->get_clock()->now() - begin;
     }
 
     if (publish_timing_) {
       ostringstream output;
 
       output << "{";
-      output << "\"draw_total\" : " << (map_elapsed + rect_elapsed).count();
-      output << ", \"rect\" : " << rect_elapsed.count();
-      output << ", \"map\" : " << map_elapsed.count();
+      output << "\"draw_total\" : " << (map_elapsed + rect_elapsed).seconds();
+      output << ", \"rect\" : " << rect_elapsed.seconds();
+      output << ", \"map\" : " << map_elapsed.seconds();
 
-      if (publish_old_api_) output << ", \"old_api\" : " << old_api_elapsed.count();
+      if (publish_old_api_) output << ", \"old_api\" : " << old_api_elapsed.seconds();
       if (publish_histogram_)
-        output << ", \"histogram\" : " << histogram_elapsed.count();
+        output << ", \"histogram\" : " << histogram_elapsed.seconds();
 
       output << "}";
 

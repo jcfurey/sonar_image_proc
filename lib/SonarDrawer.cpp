@@ -132,6 +132,8 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
   const float db =
       (azimuthBounds.second - azimuthBounds.first) / ping.nAzimuth();
 
+  if (db <= 1e-6f) return;
+
   for (int x = 0; x < newmap.cols; x++) {
     for (int y = 0; y < newmap.rows; y++) {
       // For cv::remap, a map is

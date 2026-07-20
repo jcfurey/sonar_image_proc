@@ -22,6 +22,13 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
 
+  <!-- System deps used directly and found REQUIRED in CMakeLists (OpenCV in the
+       drawers/CUDA path; Boost.program_options/filesystem/system in bag2sonar).
+       cv_bridge pulls OpenCV transitively, but this package uses it directly so
+       it is declared explicitly for rosdep-based clean builds. -->
+  <depend>libopencv-dev</depend>
+  <depend>libboost-all-dev</depend>
+
   <build_depend>rosbag2_cpp</build_depend>
   <build_depend>rosbag2_storage</build_depend>
 
