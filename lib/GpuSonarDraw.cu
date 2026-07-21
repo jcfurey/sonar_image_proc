@@ -97,7 +97,7 @@ __global__ void fan_cubic_kernel(const std::uint8_t* __restrict__ rect,
                                  int n_ranges, int n_bearings, int out_w,
                                  int out_h, int originx, float ppm,
                                  float min_range, float max_range,
-                                 float az_min, float db,
+                                 const float* __restrict__ azimuths,
                                  std::uint8_t* __restrict__ fan)
 {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -120,7 +120,28 @@ __global__ void fan_cubic_kernel(const std::uint8_t* __restrict__ rect,
     return;
   }
   const float xp = (range_m - min_range) / (max_range - min_range) * n_ranges;
-  const float yp = (azimuth - az_min) / db;
+
+  // azimuth -> fractional beam index against the REAL (non-uniform) bearing
+  // table (matches SonarDrawer::CachedMap::create). A uniform (az-min)/db
+  // mapping mislocates beams and bows straight walls into arcs.
+  const float a0 = azimuths[0], a1 = azimuths[n_bearings - 1];
+  const bool asc = a1 >= a0;
+  const float lo_a = asc ? a0 : a1, hi_a = asc ? a1 : a0;
+  if (azimuth < lo_a - 1e-6f || azimuth > hi_a + 1e-6f) {
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    return;
+  }
+  int blo = 0, bhi = n_bearings - 1;
+  while (bhi - blo > 1) {
+    const int mid = (blo + bhi) >> 1;
+    const bool left = asc ? (azimuths[mid] <= azimuth) : (azimuths[mid] >= azimuth);
+    if (left) blo = mid; else bhi = mid;
+  }
+  const float denom = azimuths[bhi] - azimuths[blo];
+  const float yp =
+      blo + (fabsf(denom) > 1e-9f ? (azimuth - azimuths[blo]) / denom : 0.f);
 
   const int x0 = static_cast<int>(floorf(xp));
   const int y0 = static_cast<int>(floorf(yp));
@@ -179,30 +200,36 @@ FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,
 }
 
 bool drawSonar(const std::uint8_t* image, int n_ranges, int n_bearings,
-               float min_range, float max_range, float azimuth_min,
-               float azimuth_max, int n_azimuth, float pixels_per_meter,
-               const std::uint8_t* lut_rgb, std::uint8_t* rect_out,
-               const FanGeometry& geom, std::uint8_t* fan_out)
+               float min_range, float max_range, const float* azimuths,
+               float pixels_per_meter, const std::uint8_t* lut_rgb,
+               std::uint8_t* rect_out, const FanGeometry& geom,
+               std::uint8_t* fan_out)
 {
-  if (n_ranges <= 0 || n_bearings <= 0 || n_azimuth <= 0 || geom.width <= 0 ||
-      geom.height <= 0 || !(max_range > min_range))
+  if (n_ranges <= 0 || n_bearings <= 0 || azimuths == nullptr ||
+      geom.width <= 0 || geom.height <= 0 || !(max_range > min_range))
     return false;
 
   static std::mutex mutex;
-  static DeviceBuffer img_buf, rect_buf, fan_buf;
+  static DeviceBuffer img_buf, rect_buf, fan_buf, az_buf;
   std::lock_guard<std::mutex> lock(mutex);
 
   const std::size_t n_cells = static_cast<std::size_t>(n_ranges) * n_bearings;
   const std::size_t n_fan = static_cast<std::size_t>(geom.width) * geom.height;
   if (!img_buf.ensure(n_cells, "gpu_draw image") ||
       !rect_buf.ensure(3 * n_cells, "gpu_draw rect") ||
-      !fan_buf.ensure(3 * n_fan, "gpu_draw fan"))
+      !fan_buf.ensure(3 * n_fan, "gpu_draw fan") ||
+      !az_buf.ensure(static_cast<std::size_t>(n_bearings) * sizeof(float),
+                     "gpu_draw azimuths"))
     return false;
 
   if (!check(cudaMemcpyToSymbol(c_lut, lut_rgb, 256 * 3), "gpu_draw lut") ||
       !check(cudaMemcpy(img_buf.as<std::uint8_t>(), image, n_cells,
                         cudaMemcpyHostToDevice),
-             "gpu_draw image upload"))
+             "gpu_draw image upload") ||
+      !check(cudaMemcpy(az_buf.as<float>(), azimuths,
+                        static_cast<std::size_t>(n_bearings) * sizeof(float),
+                        cudaMemcpyHostToDevice),
+             "gpu_draw azimuths upload"))
     return false;
 
   const int threads = 256;
@@ -210,11 +237,10 @@ bool drawSonar(const std::uint8_t* image, int n_ranges, int n_bearings,
                     threads>>>(img_buf.as<std::uint8_t>(), n_ranges,
                                n_bearings, rect_buf.as<std::uint8_t>());
 
-  const float db = (azimuth_max - azimuth_min) / n_azimuth;
   fan_cubic_kernel<<<(static_cast<int>(n_fan) + threads - 1) / threads,
                      threads>>>(
     rect_buf.as<std::uint8_t>(), n_ranges, n_bearings, geom.width, geom.height,
-    geom.originx, pixels_per_meter, min_range, max_range, azimuth_min, db,
+    geom.originx, pixels_per_meter, min_range, max_range, az_buf.as<float>(),
     fan_buf.as<std::uint8_t>());
   if (!check(cudaGetLastError(), "gpu_draw launch")) return false;
 

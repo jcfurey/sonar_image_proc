@@ -221,8 +221,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
           sonar_mat.create(cv::Size(geom.width, geom.height), CV_8UC3);
           gpu_drawn = sonar_image_proc::gpu::drawSonar(
               msg->image.data.data(), n_ranges, n_bearings,
-              interface.minRange(), interface.maxRange(), az.first, az.second,
-              interface.nAzimuth(), sonar_drawer_.pixelsPerMeter(),
+              interface.minRange(), interface.maxRange(),
+              interface.azimuths().data(), sonar_drawer_.pixelsPerMeter(),
               lut_.data(), rect_mat.data, geom, sonar_mat.data);
         }
       }

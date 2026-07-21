@@ -33,16 +33,19 @@ FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,
                         float pixels_per_meter);
 
 // image: bin-major uint8 [range_bin * n_bearings + bearing] (the msg layout).
+// azimuths: n_bearings per-beam bearings (radians, monotonic) — the REAL,
+//           non-uniform Oculus beam table. The remap interpolates azimuth ->
+//           fractional beam index against this (a uniform (az-min)/db mapping
+//           bows straight walls into arcs; matches SonarDrawer.cpp).
 // lut_rgb: 256 x 3 bytes, the colormap evaluated per intensity.
 // rect_out: n_bearings rows x n_ranges cols x 3 (the CPU drawRectSonarImage
 //           layout, ready for the rotate + rect publish).
 // fan_out: geom.height rows x geom.width cols x 3, range 0 at the bottom
 //          edge, azimuth 0 up (the CPU remapRectSonarImage output).
 bool drawSonar(const uint8_t* image, int n_ranges, int n_bearings,
-               float min_range, float max_range, float azimuth_min,
-               float azimuth_max, int n_azimuth, float pixels_per_meter,
-               const uint8_t* lut_rgb, uint8_t* rect_out,
-               const FanGeometry& geom, uint8_t* fan_out);
+               float min_range, float max_range, const float* azimuths,
+               float pixels_per_meter, const uint8_t* lut_rgb,
+               uint8_t* rect_out, const FanGeometry& geom, uint8_t* fan_out);
 
 }  // namespace gpu
 }  // namespace sonar_image_proc

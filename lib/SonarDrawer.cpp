@@ -129,10 +129,30 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
 
   newmap.create(imgSize, CV_32FC2);
 
-  const float db =
-      (azimuthBounds.second - azimuthBounds.first) / ping.nAzimuth();
-
-  if (db <= 1e-6f) return;
+  // Real per-beam bearings (radians, monotonic). The Oculus beam table is
+  // NON-UNIFORM (measured ~89% max spacing deviation, up to ~6 deg cumulative
+  // error at the fan edges), so the old uniform (azimuth - min)/db mapping
+  // placed pixels on the wrong beam and bowed straight walls into arcs (the
+  // \todo below). Interpolate azimuth -> fractional beam index against the
+  // actual bearings instead. GpuSonarDraw.cu:fan_cubic_kernel does the same.
+  const auto &azimuths = ping.azimuths();
+  const int nAz = static_cast<int>(azimuths.size());
+  if (nAz < 2) return;
+  const bool ascending = azimuths.back() >= azimuths.front();
+  // fractional beam index for a query azimuth, or -1 outside the fan
+  auto azToIndex = [&](float a) -> float {
+    const float a0 = azimuths.front(), a1 = azimuths.back();
+    const float lo_a = ascending ? a0 : a1, hi_a = ascending ? a1 : a0;
+    if (a < lo_a - 1e-6f || a > hi_a + 1e-6f) return -1.0f;
+    int lo = 0, hi = nAz - 1;
+    while (hi - lo > 1) {
+      const int mid = (lo + hi) / 2;
+      const bool left = ascending ? (azimuths[mid] <= a) : (azimuths[mid] >= a);
+      if (left) lo = mid; else hi = mid;
+    }
+    const float denom = azimuths[hi] - azimuths[lo];
+    return lo + (std::abs(denom) > 1e-9f ? (a - azimuths[lo]) / denom : 0.0f);
+  };
 
   for (int x = 0; x < newmap.cols; x++) {
     for (int y = 0; y < newmap.rows; y++) {
@@ -178,9 +198,9 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
         xp = rangeFraction * ping.nRanges();
       }
 
-      //\todo This linear algorithm is not robust if the azimuths
-      // are non-linear.   Should implement a real interpolation...
-      float yp = (azimuth - azimuthBounds.first) / db;
+      // Interpolate against the real (non-uniform) bearing table; -1 (outside
+      // the fan) lands out-of-bounds so cv::remap's BORDER_CONSTANT blacks it.
+      const float yp = azToIndex(azimuth);
 
       newmap.at<cv::Vec2f>(cv::Point(x, y)) = cv::Vec2f(xp, yp);
     }
