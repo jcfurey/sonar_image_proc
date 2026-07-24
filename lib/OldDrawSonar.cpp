@@ -39,9 +39,9 @@ cv::Size calculateImageSize(const AbstractSonarInterface &ping, cv::Size hint,
 
     // Assume bearings are symmetric plus and minus
     // Bearings must be radians
-    w = 2 * ceil(fabs(h * sin(ping.bearing(0))));
+    w = 2 * ceil(fabs(h * sin(ping.azimuth(0))));
   } else if (h <= 0) {
-    h = (w / 2) / ceil(fabs(sin(ping.bearing(0))));
+    h = (w / 2) / ceil(fabs(sin(ping.azimuth(0))));
   }
 
   // Ensure w and h are both divisible by zero
@@ -92,11 +92,11 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
   angles.reserve(nBeams);
 
   for (int b = 0; b < nBeams; ++b) {
-    const float center = ping.bearing(b);
+    const float center = ping.azimuth(b);
     float begin = 0.0, end = 0.0;
 
     if (b == 0) {
-      end = (ping.bearing(b + 1) + center) / 2.0;
+      end = (ping.azimuth(b + 1) + center) / 2.0;
       begin = 2 * center - end;
 
     } else if (b == nBeams - 1) {
@@ -105,7 +105,7 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
 
     } else {
       begin = angles[b - 1].end;
-      end = (ping.bearing(b + 1) + center) / 2.0;
+      end = (ping.azimuth(b + 1) + center) / 2.0;
     }
 
     angles.push_back(BearingEntry(begin, center, end));

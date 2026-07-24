@@ -4,11 +4,11 @@
 
 #include "sonar_image_proc/draw_sonar_component.hpp"
 
+#include <chrono>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <sstream>
-#include <chrono>
 
 #include <cv_bridge/cv_bridge.hpp>
 
@@ -66,7 +66,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     publish_old_api_ = this->get_parameter("publish_old").as_bool();
     publish_timing_ = this->get_parameter("publish_timing").as_bool();
     publish_histogram_ = this->get_parameter("publish_histogram").as_bool();
-    
+
     std::string color_map_name = this->get_parameter("color_map").as_string();
     setColorMap(color_map_name);
 
@@ -77,6 +77,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // Set the pixels per meter scale factor for the sonar drawer
     float pixels_per_meter = this->get_parameter("pixels_per_meter").as_double();
     sonar_drawer_.setPixelsPerMeter(pixels_per_meter);
+    sonar_drawer_.setMaxRange(max_range_);
     RCLCPP_INFO(this->get_logger(), "Using pixels_per_meter: %f", pixels_per_meter);
 
     // Configure sonar drawer overlay
@@ -127,7 +128,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       const cv::Mat &mat,
       rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr &pub) {
     cv_bridge::CvImage img_bridge(msg->header, "rgb8", mat);
-    
+
     auto output_msg = img_bridge.toImageMsg();
     pub->publish(*output_msg);
   }
@@ -140,6 +141,14 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     }
 
     SonarImageMsgInterface interface(msg);
+    if (interface.nRanges() < 2 || interface.nBearings() < 2) {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Dropping sonar image: rendering requires at least 2 ranges and "
+          "2 bearings (got %d ranges x %d bearings)",
+          interface.nRanges(), interface.nBearings());
+      return;
+    }
     // A data buffer shorter than ranges*bearings*elem was read out of bounds
     // by every consumer below (the CPU index() lookups and the GPU H2D copy
     // alike) — validate once, before any path touches it.
@@ -164,7 +173,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       interface.do_log_scale(min_db_, max_db_);
     }
 
-    rclcpp::Duration old_api_elapsed(0, 0), rect_elapsed(0, 0), map_elapsed(0, 0), histogram_elapsed(0, 0);
+    rclcpp::Duration old_api_elapsed(0, 0), rect_elapsed(0, 0);
+    rclcpp::Duration map_elapsed(0, 0), histogram_elapsed(0, 0);
 
     if (publish_old_api_) {
       auto begin = this->get_clock()->now();
@@ -212,8 +222,10 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         const int n_ranges = interface.nRanges();
         const int n_bearings = interface.nBearings();
         const auto az = interface.azimuthBounds();
+        const float display_max_range =
+            sonar_drawer_.effectiveMaxRange(interface);
         const auto geom = sonar_image_proc::gpu::fanGeometry(
-            interface.maxRange(), az.first, az.second,
+            display_max_range, az.first, az.second,
             sonar_drawer_.pixelsPerMeter());
         if (n_ranges > 0 && n_bearings > 0 && geom.width > 0 &&
             geom.height > 0) {
@@ -280,7 +292,9 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       color_map_.reset(new sonar_image_proc::MitchellColorMap());
     } else {
       if (color_map_name != "inferno") {
-        RCLCPP_WARN(this->get_logger(), "Unknown color_map '%s', using 'inferno'", color_map_name.c_str());
+        RCLCPP_WARN(this->get_logger(),
+                    "Unknown color_map '%s', using 'inferno'",
+                    color_map_name.c_str());
       }
       color_map_.reset(new InfernoColorMap());
     }

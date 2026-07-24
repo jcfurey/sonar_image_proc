@@ -8,6 +8,9 @@
 #pragma once
 
 #include <memory>
+#include <utility>
+#include <vector>
+
 #include <opencv2/core/core.hpp>
 
 #include "sonar_image_proc/AbstractSonarInterface.h"
@@ -94,6 +97,13 @@ class SonarDrawer {
   void setPixelsPerMeter(float ppm) { pixels_per_meter_ = ppm; }
   float pixelsPerMeter() const { return pixels_per_meter_; }
 
+  // Limit the Cartesian fan to this range in meters. A non-positive value
+  // uses the full range reported by the ping. The rectangular source image is
+  // intentionally unaffected.
+  void setMaxRange(float max_range) { max_range_ = max_range; }
+  float maxRange() const { return max_range_; }
+  float effectiveMaxRange(const AbstractSonarInterface &ping) const;
+
   // Calls drawRectSonarImage followed by remapRectSonarImage inline
   // The intermediate rectangular image is not returned, if required,
   // use the two functions individually...
@@ -133,6 +143,7 @@ class SonarDrawer {
  private:
   OverlayConfig overlay_config_;
   float pixels_per_meter_;
+  float max_range_;
 
   // Utility class which can generate and store the two cv::Mats
   // required for the cv::remap() function
@@ -141,7 +152,11 @@ class SonarDrawer {
   // invalid and needs to be regenerated.
   struct Cached {
    public:
-    Cached() { ; }
+    Cached()
+        : _rangeBounds(UnsetBounds),
+          _azimuthBounds(UnsetBounds),
+          _numRanges(0),
+          _numAzimuth(0) { ; }
 
    protected:
     virtual bool isValid(const AbstractSonarInterface &ping) const;
@@ -153,39 +168,44 @@ class SonarDrawer {
 
   struct CachedMap : public Cached {
    public:
-    CachedMap() : Cached(), _pixelsPerMeter(0.0f) { ; }
+    CachedMap() : Cached(), _pixelsPerMeter(0.0f), _maxRange(0.0f) { ; }
     typedef std::pair<cv::Mat, cv::Mat> MapPair;
 
-    MapPair operator()(const AbstractSonarInterface &ping, float pixelsPerMeter);
+    MapPair operator()(const AbstractSonarInterface &ping, float pixelsPerMeter,
+                       float maxRange);
 
    private:
-    bool isValid(const AbstractSonarInterface &ping, float pixelsPerMeter) const;
-    void create(const AbstractSonarInterface &ping, float pixelsPerMeter);
+    bool isValidFor(const AbstractSonarInterface &ping, float pixelsPerMeter,
+                    float maxRange) const;
+    void create(const AbstractSonarInterface &ping, float pixelsPerMeter,
+                float maxRange);
 
     cv::Mat _scMap1, _scMap2;
     float _pixelsPerMeter;
+    float _maxRange;
+    std::vector<float> _azimuths;
   } _map;
 
   struct CachedOverlay : public Cached {
    public:
-    CachedOverlay() : Cached() { ; }
+    CachedOverlay() : Cached(), _maxRange(0.0f) { ; }
 
     const cv::Mat &operator()(const AbstractSonarInterface &ping,
                               const cv::Mat &sonarImage,
-                              const OverlayConfig &config);
+                              const OverlayConfig &config, float maxRange);
 
    private:
-    bool isValid(const AbstractSonarInterface &ping, const cv::Mat &sonarImage,
-                 const OverlayConfig &config) const;
+    bool isValidFor(const AbstractSonarInterface &ping,
+                    const cv::Mat &sonarImage, const OverlayConfig &config,
+                    float maxRange) const;
 
     void create(const AbstractSonarInterface &ping, const cv::Mat &sonarImage,
-                const OverlayConfig &config);
+                const OverlayConfig &config, float maxRange);
 
     cv::Mat _overlay;
     OverlayConfig _config_used;
-
+    float _maxRange;
   } _overlay;
-
-};  // namespace sonar_image_procclassSonarDrawer
+};  // class SonarDrawer
 
 }  // namespace sonar_image_proc

@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
 project(sonar_image_proc)
 
+# OpenCV's CUDA-enabled package config still calls the legacy FindCUDA module.
+# Select the compatibility behavior explicitly on newer CMake releases.
+if(POLICY CMP0146)
+  cmake_policy(SET CMP0146 OLD)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   # C++ only — nvcc does not understand these flags directly
   add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
@@ -52,8 +58,25 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
-# System (non-ament) deps found explicitly
-find_package(Boost COMPONENTS filesystem system program_options REQUIRED)
+# ament_auto_depend_on_packages is the non-deprecated API in newer ament
+# releases, but it is not provided by ROS 2 Jazzy. Keep the package buildable
+# on both versions while Jazzy remains in use.
+function(sonar_target_dependencies target)
+  if(COMMAND ament_auto_depend_on_packages)
+    ament_auto_depend_on_packages(${target} PACKAGES ${ARGN})
+  else()
+    ament_target_dependencies(${target} ${ARGN})
+  endif()
+endfunction()
+
+# System (non-ament) deps found explicitly. Only bag2sonar uses Boost, and it
+# uses program_options; requiring the unused filesystem/system components makes
+# otherwise valid builds fail on distributions where Boost.System is
+# header-only.
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
+find_package(Boost COMPONENTS program_options REQUIRED)
 list(APPEND OPENCV_COMPONENTS core highgui imgproc)
 find_package(OpenCV COMPONENTS ${OPENCV_COMPONENTS} REQUIRED)
 
@@ -74,7 +97,7 @@ set(sonar_image_proc_SRCS
 # Core library containing core functionality
 add_library(sonar_image_proc SHARED ${sonar_image_proc_SRCS})
 target_link_libraries(sonar_image_proc ${OpenCV_LIBS})
-ament_target_dependencies(sonar_image_proc
+sonar_target_dependencies(sonar_image_proc
   rclcpp
   sensor_msgs
   marine_acoustic_msgs
@@ -94,7 +117,7 @@ add_library(sonar_image_proc_components SHARED
   ros/src/sonar_postprocessor_component.cpp
 )
 target_link_libraries(sonar_image_proc_components sonar_image_proc)
-ament_target_dependencies(sonar_image_proc_components
+sonar_target_dependencies(sonar_image_proc_components
   rclcpp
   rclcpp_components
   sensor_msgs
@@ -111,13 +134,13 @@ rclcpp_components_register_nodes(sonar_image_proc_components "sonar_postprocesso
 # Standalone nodes
 add_executable(draw_sonar_node ros/src/draw_sonar_node.cpp)
 target_link_libraries(draw_sonar_node sonar_image_proc_components)
-ament_target_dependencies(draw_sonar_node
+sonar_target_dependencies(draw_sonar_node
   rclcpp
 )
 
 add_executable(sonar_postprocessor_node ros/src/sonar_postprocessor_node.cpp)
 target_link_libraries(sonar_postprocessor_node sonar_image_proc_components)
-ament_target_dependencies(sonar_postprocessor_node
+sonar_target_dependencies(sonar_postprocessor_node
   rclcpp
 )
 
@@ -131,7 +154,7 @@ target_include_directories(bag2sonar PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/ros/include
 )
-ament_target_dependencies(bag2sonar
+sonar_target_dependencies(bag2sonar
   rclcpp
   rosbag2_cpp
   rosbag2_storage
@@ -165,20 +188,10 @@ install(DIRECTORY params/
   FILES_MATCHING PATTERN "*.yaml"
 )
 
-install(DIRECTORY include/
-  DESTINATION include/${PROJECT_NAME}
-  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h"
-)
-
-install(DIRECTORY ros/include/
-  DESTINATION include/${PROJECT_NAME}
-  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h"
-)
-
-# Install Python modules and scripts
-install(DIRECTORY python/sonar_image_proc
-  DESTINATION lib/python3.12/site-packages
-  FILES_MATCHING PATTERN "*.py"
+# Install the Python module into the active interpreter's platform-independent
+# package directory instead of a hard-coded Python-version path.
+ament_python_install_package(${PROJECT_NAME}
+  PACKAGE_DIR python/${PROJECT_NAME}
 )
 
 install(PROGRAMS
@@ -190,6 +203,10 @@ install(PROGRAMS
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_draw_sonar test/unit/test_draw_sonar.cpp)
+  target_link_libraries(test_draw_sonar sonar_image_proc)
 endif()
 
 ament_auto_package()

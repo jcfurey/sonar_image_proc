@@ -119,7 +119,9 @@ __global__ void fan_cubic_kernel(const std::uint8_t* __restrict__ rect,
     out[2] = 0;
     return;
   }
-  const float xp = (range_m - min_range) / (max_range - min_range) * n_ranges;
+  // Endpoint-inclusive range coordinates: min/max map to columns 0/n-1.
+  const float xp =
+      (range_m - min_range) / (max_range - min_range) * (n_ranges - 1);
 
   // azimuth -> fractional beam index against the REAL (non-uniform) bearing
   // table (matches SonarDrawer::CachedMap::create). A uniform (az-min)/db

@@ -21,19 +21,23 @@
   <depend>image_transport</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <!-- System deps used directly and found REQUIRED in CMakeLists (OpenCV in the
-       drawers/CUDA path; Boost.program_options/filesystem/system in bag2sonar).
+       drawers/CUDA path; Boost.Program_options in bag2sonar).
        cv_bridge pulls OpenCV transitively, but this package uses it directly so
        it is declared explicitly for rosdep-based clean builds. -->
   <depend>libopencv-dev</depend>
   <depend>libboost-all-dev</depend>
 
-  <build_depend>rosbag2_cpp</build_depend>
-  <build_depend>rosbag2_storage</build_depend>
+  <depend>rosbag2_cpp</depend>
+  <depend>rosbag2_storage</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

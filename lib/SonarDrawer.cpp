@@ -1,8 +1,11 @@
 // Copyright 2021 University of Washington Applied Physics Laboratory
 //
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <limits>
+
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/DrawSonar.h"
@@ -15,7 +18,14 @@ using sonar_image_proc::AbstractSonarInterface;
 static float deg2radf(float deg) { return deg * M_PI / 180.0; }
 static float rad2degf(float rad) { return rad * 180.0 / M_PI; }
 
-SonarDrawer::SonarDrawer() : pixels_per_meter_(100.0f) { ; }
+SonarDrawer::SonarDrawer() : pixels_per_meter_(100.0f), max_range_(0.0f) { ; }
+
+float SonarDrawer::effectiveMaxRange(
+    const AbstractSonarInterface &ping) const {
+  const float ping_max_range = ping.maxRange();
+  if (max_range_ <= 0.0f) return ping_max_range;
+  return std::min(max_range_, ping_max_range);
+}
 
 cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
                                         const SonarColorMap &colorMap,
@@ -54,7 +64,8 @@ cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
 cv::Mat SonarDrawer::remapRectSonarImage(const AbstractSonarInterface &ping,
                                          const cv::Mat &rectImage) {
   cv::Mat out;
-  const CachedMap::MapPair maps(_map(ping, pixels_per_meter_));
+  const CachedMap::MapPair maps(
+      _map(ping, pixels_per_meter_, effectiveMaxRange(ping)));
   cv::remap(rectImage, out, maps.first, maps.second, cv::INTER_CUBIC,
             cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
@@ -66,7 +77,9 @@ cv::Mat SonarDrawer::drawOverlay(const AbstractSonarInterface &ping,
   // Alpha blend overlay onto sonarImage
   cv::Mat output;
   overlayImage<unsigned char>(
-      sonarImage, _overlay(ping, sonarImage, overlayConfig()), output);
+      sonarImage,
+      _overlay(ping, sonarImage, overlayConfig(), effectiveMaxRange(ping)),
+      output);
 
   return output;
 }
@@ -98,9 +111,10 @@ bool SonarDrawer::Cached::isValid(const AbstractSonarInterface &ping) const {
 // ==== SonarDrawer::CachedMap ====
 
 SonarDrawer::CachedMap::MapPair SonarDrawer::CachedMap::operator()(
-    const AbstractSonarInterface &ping, float pixelsPerMeter) {
+    const AbstractSonarInterface &ping, float pixelsPerMeter, float maxRange) {
   // _scMap[12] are mutable to break out of const
-  if (!isValid(ping, pixelsPerMeter)) create(ping, pixelsPerMeter);
+  if (!isValidFor(ping, pixelsPerMeter, maxRange))
+    create(ping, pixelsPerMeter, maxRange);
 
   return std::make_pair(_scMap1, _scMap2);
 }
@@ -109,17 +123,20 @@ SonarDrawer::CachedMap::MapPair SonarDrawer::CachedMap::operator()(
 //   * It has nBearings cols and nRanges rows
 //
 void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
-                                    float pixelsPerMeter) {
+                                    float pixelsPerMeter,
+                                    float displayMaxRange) {
   cv::Mat newmap;
 
   const auto azimuthBounds = ping.azimuthBounds();
-  const float maxRange = ping.maxRange();
-  
+
   // Calculate image dimensions based on pixels per meter scale factor
   // Height represents maxRange since origin is at the bottom
-  const int height = static_cast<int>(ceil(maxRange * pixelsPerMeter));
-  const int minusWidth = static_cast<int>(floor(height * sin(azimuthBounds.first)));
-  const int plusWidth = static_cast<int>(ceil(height * sin(azimuthBounds.second)));
+  const int height =
+      static_cast<int>(ceil(displayMaxRange * pixelsPerMeter));
+  const int minusWidth =
+      static_cast<int>(floor(height * sin(azimuthBounds.first)));
+  const int plusWidth =
+      static_cast<int>(ceil(height * sin(azimuthBounds.second)));
   const int width = plusWidth - minusWidth;
 
   const int originx = abs(minusWidth);
@@ -147,8 +164,13 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
     int lo = 0, hi = nAz - 1;
     while (hi - lo > 1) {
       const int mid = (lo + hi) / 2;
-      const bool left = ascending ? (azimuths[mid] <= a) : (azimuths[mid] >= a);
-      if (left) lo = mid; else hi = mid;
+      const bool left =
+          ascending ? (azimuths[mid] <= a) : (azimuths[mid] >= a);
+      if (left) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
     }
     const float denom = azimuths[hi] - azimuths[lo];
     return lo + (std::abs(denom) > 1e-9f ? (a - azimuths[lo]) / denom : 0.0f);
@@ -180,22 +202,26 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
       // rangeInPixels is distance from origin in output image (origin = range 0)
       // Convert to actual range in meters, then to range bin index
       const float rangeInPixels = range;  // Distance in pixels from origin
-      const float rangeInMeters = rangeInPixels / pixelsPerMeter;  // Convert to meters
-      
+      const float rangeInMeters =
+          rangeInPixels / pixelsPerMeter;  // Convert to meters
+
       // Map range in meters to range bin index
       // Sonar data spans from minRange to maxRange
       const float minRange = ping.minRange();
-      const float maxRange = ping.maxRange();
-      const float rangeSpan = maxRange - minRange;
-      
+      const float sourceMaxRange = ping.maxRange();
+      const float rangeSpan = sourceMaxRange - minRange;
+
       // Clamp to valid range and convert to bin index
       float xp;
-      if (rangeInMeters < minRange || rangeInMeters > maxRange) {
+      if (rangeInMeters < minRange || rangeInMeters > sourceMaxRange) {
         // Out of range - map to transparent/invalid
         xp = -1.0f;  // Will be clamped/handled by remap
       } else {
         const float rangeFraction = (rangeInMeters - minRange) / rangeSpan;
-        xp = rangeFraction * ping.nRanges();
+        // The first and last range values correspond to source columns 0 and
+        // n-1. Multiplying by n mapped maxRange one column past the image,
+        // blackening the outer edge and shifting every intermediate sample.
+        xp = rangeFraction * (ping.nRanges() - 1);
       }
 
       // Interpolate against the real (non-uniform) bearing table; -1 (outside
@@ -215,33 +241,41 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
   _rangeBounds = ping.rangeBounds();
   _azimuthBounds = ping.azimuthBounds();
   _pixelsPerMeter = pixelsPerMeter;
+  _maxRange = displayMaxRange;
+  _azimuths = azimuths;
 }
 
-bool SonarDrawer::CachedMap::isValid(const AbstractSonarInterface &ping, float pixelsPerMeter) const {
+bool SonarDrawer::CachedMap::isValidFor(const AbstractSonarInterface &ping,
+                                        float pixelsPerMeter,
+                                        float maxRange) const {
   if (_scMap1.empty() || _scMap2.empty()) return false;
-  
+
   // Check if pixels per meter has changed
   if (_pixelsPerMeter != pixelsPerMeter) return false;
+  if (_maxRange != maxRange) return false;
+  if (_azimuths != ping.azimuths()) return false;
 
   return Cached::isValid(ping);
 }
 
 // === SonarDrawer::CachedOverlay ===
 
-bool SonarDrawer::CachedOverlay::isValid(const AbstractSonarInterface &ping,
-                                         const cv::Mat &sonarImage,
-                                         const OverlayConfig &config) const {
+bool SonarDrawer::CachedOverlay::isValidFor(
+    const AbstractSonarInterface &ping, const cv::Mat &sonarImage,
+    const OverlayConfig &config, float maxRange) const {
   if (sonarImage.size() != _overlay.size()) return false;
 
   if (_config_used != config) return false;
+  if (_maxRange != maxRange) return false;
 
   return Cached::isValid(ping);
 }
 
 const cv::Mat &SonarDrawer::CachedOverlay::operator()(
     const AbstractSonarInterface &ping, const cv::Mat &sonarImage,
-    const OverlayConfig &config) {
-  if (!isValid(ping, sonarImage, config)) create(ping, sonarImage, config);
+    const OverlayConfig &config, float maxRange) {
+  if (!isValidFor(ping, sonarImage, config, maxRange))
+    create(ping, sonarImage, config, maxRange);
 
   return _overlay;
 }
@@ -253,7 +287,8 @@ static float bearingToImage(float d) { return (-M_PI / 2) + d; }
 
 void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
                                         const cv::Mat &sonarImage,
-                                        const OverlayConfig &config) {
+                                        const OverlayConfig &config,
+                                        float maxRange) {
   const cv::Size sz(sonarImage.size());
   const cv::Point2f origin(sz.width / 2, sz.height);
 
@@ -266,8 +301,6 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
 
   const float minAzimuth = ping.minAzimuth();
   const float maxAzimuth = ping.maxAzimuth();
-
-  const float maxRange = ping.maxRange();
 
   //== Draw arcs ==
   float arcSpacing = config.rangeSpacing();
@@ -288,7 +321,7 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
 
   const float minRange = arcSpacing;
 
-  for (float r = minRange; r < ping.maxRange(); r += arcSpacing) {
+  for (float r = minRange; r < maxRange; r += arcSpacing) {
     const float radiusPix = (r / maxRange) * sonarImage.size().height;
 
     cv::ellipse(_overlay, origin, cv::Size(radiusPix, radiusPix), 0,
@@ -315,7 +348,8 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
   }
 
   // And one arc at max range
-  cv::ellipse(_overlay, origin, cv::Size(sz.height, sz.height), 0, rad2degf(bearingToImage(minAzimuth)),
+  cv::ellipse(_overlay, origin, cv::Size(sz.height, sz.height), 0,
+              rad2degf(bearingToImage(minAzimuth)),
               rad2degf(bearingToImage(maxAzimuth)), lineColor,
               config.lineThickness());
 
@@ -366,6 +400,11 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
   }
 
   _config_used = config;
+  _maxRange = maxRange;
+  _numRanges = ping.nRanges();
+  _numAzimuth = ping.nBearings();
+  _rangeBounds = ping.rangeBounds();
+  _azimuthBounds = ping.azimuthBounds();
 }
 
 }  // namespace sonar_image_proc

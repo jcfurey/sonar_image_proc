@@ -2,79 +2,80 @@
 # Simple ROS2 Launch file for drawing sonar images only
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
-from launch_ros.actions import ComposableNodeContainer
-from ament_index_python.packages import get_package_share_directory
-import os
 
 
 def generate_launch_description():
-    """
-    Simple launch file for sonar image visualization.
-    
+    """Launch sonar image visualization.
+
     Launches a single draw_sonar node to visualize sonar images.
     This can be easily included in other launch files.
     """
-    
     # Declare launch arguments
     namespace_arg = DeclareLaunchArgument(
         'namespace',
         default_value='',
         description='Namespace for the draw_sonar node'
     )
-    
+
     sonar_topic_arg = DeclareLaunchArgument(
         'sonar_topic',
         default_value='/oculus/sonar_image',
         description='Input sonar image topic'
     )
-    
+
     params_file_arg = DeclareLaunchArgument(
         'params_file',
         default_value='',
-        description='Path to YAML params file (e.g., oculus/common.yaml). If provided, other parameters are ignored.'
+        description=(
+            'Path to a YAML parameter file. If provided, inline parameters '
+            'are ignored.'
+        )
     )
-    
+
     use_composition_arg = DeclareLaunchArgument(
         'use_composition',
         default_value='true',
         description='Use component container for better performance'
     )
-    
+
     color_map_arg = DeclareLaunchArgument(
         'color_map',
         default_value='inferno',
         description='Color map for visualization (inferno, hot, jet, etc.)'
     )
-    
+
     log_scale_arg = DeclareLaunchArgument(
         'log_scale',
         default_value='false',
         description='Use logarithmic scale for intensity'
     )
-    
+
     publish_histogram_arg = DeclareLaunchArgument(
         'publish_histogram',
         default_value='false',
         description='Publish histogram data'
     )
-    
+
     max_range_arg = DeclareLaunchArgument(
         'max_range',
         default_value='0.0',
         description='Maximum range to display (0.0 for auto)'
     )
-    
+
     pixels_per_meter_arg = DeclareLaunchArgument(
         'pixels_per_meter',
         default_value='100.0',
-        description='Output image scale factor (pixels per meter). Higher values = larger images. Default: 100.0'
+        description=(
+            'Output image scale in pixels per meter. Higher values produce '
+            'larger images.'
+        )
     )
-    
+
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
     sonar_topic = LaunchConfiguration('sonar_topic')
@@ -85,16 +86,16 @@ def generate_launch_description():
     publish_histogram = LaunchConfiguration('publish_histogram')
     max_range = LaunchConfiguration('max_range')
     pixels_per_meter = LaunchConfiguration('pixels_per_meter')
-    
-    # Helper to conditionally load params from file or use inline
-    def get_draw_sonar_params():
-        params_file_str = params_file.perform(None) if hasattr(params_file, 'perform') else ''
-        if params_file_str and os.path.exists(params_file_str):
-            # Load from file
-            return [params_file_str]
+
+    # Parameter-file selection must happen with a live LaunchContext. Resolving
+    # a LaunchConfiguration while constructing the description raises before
+    # ROS can launch anything.
+    def launch_setup(context):
+        params_file_path = params_file.perform(context)
+        if params_file_path:
+            draw_sonar_params = [params_file_path]
         else:
-            # Use inline parameters
-            return [{
+            draw_sonar_params = [{
                 'publish_histogram': publish_histogram,
                 'color_map': color_map,
                 'log_scale': log_scale,
@@ -109,46 +110,43 @@ def generate_launch_description():
                 'min_db': -80.0,
                 'max_db': 0.0,
             }]
-    
-    # Define common parameters
-    draw_sonar_params = get_draw_sonar_params()
-    
-    # Component version
-    draw_sonar_component = ComposableNode(
-        package='sonar_image_proc',
-        plugin='draw_sonar::DrawSonarComponent',
-        name='draw_sonar',
-        namespace=namespace,
-        parameters=draw_sonar_params,
-        remappings=[
-            ('sonar_image', sonar_topic),
-        ],
-    )
-    
-    component_container = ComposableNodeContainer(
-        name='draw_sonar_container',
-        namespace=namespace,
-        package='rclcpp_components',
-        executable='component_container',
-        composable_node_descriptions=[draw_sonar_component],
-        output='screen',
-        condition=IfCondition(use_composition)
-    )
-    
-    # Standalone node version
-    draw_sonar_node = Node(
-        package='sonar_image_proc',
-        executable='draw_sonar_node',
-        name='draw_sonar',
-        namespace=namespace,
-        parameters=[draw_sonar_params],
-        remappings=[
-            ('sonar_image', sonar_topic),
-        ],
-        output='screen',
-        condition=UnlessCondition(use_composition)
-    )
-    
+
+        draw_sonar_component = ComposableNode(
+            package='sonar_image_proc',
+            plugin='draw_sonar::DrawSonarComponent',
+            name='draw_sonar',
+            namespace=namespace,
+            parameters=draw_sonar_params,
+            remappings=[
+                ('sonar_image', sonar_topic),
+            ],
+        )
+
+        component_container = ComposableNodeContainer(
+            name='draw_sonar_container',
+            namespace=namespace,
+            package='rclcpp_components',
+            executable='component_container',
+            composable_node_descriptions=[draw_sonar_component],
+            output='screen',
+            condition=IfCondition(use_composition)
+        )
+
+        draw_sonar_node = Node(
+            package='sonar_image_proc',
+            executable='draw_sonar_node',
+            name='draw_sonar',
+            namespace=namespace,
+            parameters=draw_sonar_params,
+            remappings=[
+                ('sonar_image', sonar_topic),
+            ],
+            output='screen',
+            condition=UnlessCondition(use_composition)
+        )
+
+        return [component_container, draw_sonar_node]
+
     return LaunchDescription([
         namespace_arg,
         sonar_topic_arg,
@@ -159,6 +157,5 @@ def generate_launch_description():
         publish_histogram_arg,
         max_range_arg,
         pixels_per_meter_arg,
-        component_container,
-        draw_sonar_node,
+        OpaqueFunction(function=launch_setup),
     ])

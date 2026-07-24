@@ -47,9 +47,8 @@ struct AbstractSonarInterface {
   virtual const std::vector<float> &azimuths() const = 0;
 
   int nBearings() const { return azimuths().size(); }
-  __attribute__((deprecated));
+  [[deprecated("use azimuth()")]]
   float bearing(int n) const { return azimuths().at(n); }
-  __attribute__((deprecated));
 
   int nAzimuth() const { return azimuths().size(); }
   int nAzimuths() const {
@@ -119,18 +118,18 @@ struct AbstractSonarInterface {
   }
 
   // Trivial wrappers.  These will be deprecated eventually
+  [[deprecated("use the AzimuthRangeIndices overload")]]
   float intensity_float(size_t a, size_t r) const {
     return intensity_float(AzimuthRangeIndices(a, r));
   }
-  __attribute__((deprecated));
+  [[deprecated("use the AzimuthRangeIndices overload")]]
   uint8_t intensity_uint8(size_t a, size_t r) const {
     return intensity_uint8(AzimuthRangeIndices(a, r));
   }
-  __attribute__((deprecated));
+  [[deprecated("use the AzimuthRangeIndices overload")]]
   uint16_t intensity_uint16(size_t a, size_t r) const {
     return intensity_uint16(AzimuthRangeIndices(a, r));
   }
-  __attribute__((deprecated));
 
  private:
   // In a few cases, need to "check and potentially calculate cached

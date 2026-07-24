@@ -13,7 +13,6 @@ using sonar_image_proc::SonarImageMsgInterface;
 
 SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptions & options)
       : Node("sonar_postprocessor", options) {
-    
     // Declare and get parameters
     this->declare_parameter("gain", 1.0);
     this->declare_parameter("gamma", 0.0);
@@ -22,8 +21,8 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
     gamma_ = this->get_parameter("gamma").as_double();
 
     sub_sonar_image_ = this->create_subscription<ProjectedSonarImage>(
-        "sonar_image", 10,
-        std::bind(&SonarPostprocessorComponent::sonarImageCallback, 
+        "sonar_image", rclcpp::SensorDataQoS(),
+        std::bind(&SonarPostprocessorComponent::sonarImageCallback,
                   this, std::placeholders::_1));
 
     pub_sonar_image_ = this->create_publisher<ProjectedSonarImage>(
@@ -66,8 +65,8 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
     out.image.data.reserve(interface.ranges().size() *
                            interface.azimuths().size());
 
-    for (unsigned int r_idx = 0; r_idx < interface.nRanges(); ++r_idx) {
-      for (unsigned int a_idx = 0; a_idx < interface.nAzimuth(); ++a_idx) {
+    for (int r_idx = 0; r_idx < interface.nRanges(); ++r_idx) {
+      for (int a_idx = 0; a_idx < interface.nAzimuth(); ++a_idx) {
         sonar_image_proc::AzimuthRangeIndices idx(a_idx, r_idx);
 
         // Avoid log(0); normalize to [0, 1] in log space
