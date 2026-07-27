@@ -49,6 +49,7 @@ class DrawSonarComponent : public rclcpp::Node {
 
   float min_db_, max_db_;
   bool log_scale_;
+  std::string input_image_layout_;
 
   std::unique_ptr<sonar_image_proc::SonarColorMap> color_map_;
 

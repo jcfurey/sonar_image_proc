@@ -8,8 +8,23 @@
 #include <vector>
 
 #include "sonar_image_proc/DrawSonar.h"
+#include "sonar_image_proc/ImageLayout.h"
 
 namespace {
+
+TEST(TestDrawSonar, DecodesStandardBeamMajorPayload) {
+  const std::vector<std::uint8_t> beam_major{
+      10, 0, 11, 0, 12, 0, 20, 0, 21, 0, 22, 0};
+  const std::vector<std::uint8_t> expected_range_major{
+      10, 0, 20, 0, 11, 0, 21, 0, 12, 0, 22, 0};
+  std::vector<std::uint8_t> range_major;
+
+  ASSERT_TRUE(sonar_image_proc::beamMajorToRangeMajor(
+      beam_major, 3, 2, 2, range_major));
+  EXPECT_EQ(range_major, expected_range_major);
+  EXPECT_FALSE(sonar_image_proc::beamMajorToRangeMajor(
+      beam_major, 4, 2, 2, range_major));
+}
 
 class TestPing : public sonar_image_proc::AbstractSonarInterface {
  public:

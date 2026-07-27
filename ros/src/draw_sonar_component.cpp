@@ -15,6 +15,7 @@
 #include "sonar_image_proc/ColorMaps.h"
 #include "sonar_image_proc/DrawSonar.h"
 #include "sonar_image_proc/HistogramGenerator.h"
+#include "sonar_image_proc/ImageLayout.h"
 #include "sonar_image_proc/SonarDrawer.h"
 #include "sonar_image_proc/sonar_image_msg_interface.h"
 #ifdef SONAR_IMAGE_PROC_WITH_CUDA
@@ -56,6 +57,10 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     this->declare_parameter("min_db", -80.0);
     this->declare_parameter("max_db", 0.0);
     this->declare_parameter("pixels_per_meter", 100.0);
+    // marine_acoustic_msgs is beam-major. The rendering library retains its
+    // range-major working image; older recorded images can opt into the
+    // compatibility layout through bringup.
+    this->declare_parameter("input_image_layout", "beam_major");
     // draw on the GPU (colormap LUT + bicubic fan remap, visually equivalent;
     // see lib/GpuSonarDraw.cu). CPU path is the fallback for non-uint8 pings,
     // non-LUT colormaps, or any device failure.
@@ -66,6 +71,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     publish_old_api_ = this->get_parameter("publish_old").as_bool();
     publish_timing_ = this->get_parameter("publish_timing").as_bool();
     publish_histogram_ = this->get_parameter("publish_histogram").as_bool();
+    input_image_layout_ =
+        this->get_parameter("input_image_layout").as_string();
 
     std::string color_map_name = this->get_parameter("color_map").as_string();
     setColorMap(color_map_name);
@@ -140,7 +147,35 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       return;
     }
 
-    SonarImageMsgInterface interface(msg);
+    const std::size_t n_ranges = msg->ranges.size();
+    const std::size_t n_bearings = msg->image.beam_count;
+    std::size_t elem = 0;
+    if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
+    else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
+    else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
+
+    auto working_msg = msg;
+    if (input_image_layout_ == "beam_major") {
+      auto range_major =
+          std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>(*msg);
+      if (!sonar_image_proc::beamMajorToRangeMajor(
+              msg->image.data, n_ranges, n_bearings, elem,
+              range_major->image.data)) {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: could not decode beam-major payload");
+        return;
+      }
+      working_msg = std::move(range_major);
+    } else if (input_image_layout_ != "range_major") {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Unknown input_image_layout '%s' (expected beam_major or range_major)",
+          input_image_layout_.c_str());
+      return;
+    }
+
+    SonarImageMsgInterface interface(working_msg);
     if (interface.nRanges() < 2 || interface.nBearings() < 2) {
       RCLCPP_ERROR_THROTTLE(
           this->get_logger(), *this->get_clock(), 5000,
@@ -153,18 +188,14 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // by every consumer below (the CPU index() lookups and the GPU H2D copy
     // alike) — validate once, before any path touches it.
     {
-      size_t elem = 0;
-      if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
-      else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
-      else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
       const size_t need = static_cast<size_t>(interface.nRanges()) *
                           static_cast<size_t>(interface.nBearings()) * elem;
-      if (elem > 0 && msg->image.data.size() < need) {
+      if (elem > 0 && working_msg->image.data.size() < need) {
         RCLCPP_ERROR_THROTTLE(
             this->get_logger(), *this->get_clock(), 5000,
             "Dropping sonar image: %zu data bytes < %zu required "
             "(%d ranges x %d bearings)",
-            msg->image.data.size(), need, interface.nRanges(),
+            working_msg->image.data.size(), need, interface.nRanges(),
             interface.nBearings());
         return;
       }
@@ -189,7 +220,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       mat = sonar_image_proc::old_api::drawSonar(interface, mat, *color_map_,
                                                  max_range_);
 
-      cvBridgeAndPublish(msg, mat, old_pub_);
+      cvBridgeAndPublish(working_msg, mat, old_pub_);
 
       old_api_elapsed = this->get_clock()->now() - begin;
     }
@@ -216,7 +247,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       // GpuSonarDraw.h — LUT stage exact, remap visually equivalent). Any
       // failure or unsupported input falls through to the CPU path below.
       if (use_gpu_ && lut_valid_ &&
-          msg->image.dtype ==
+          working_msg->image.dtype ==
               marine_acoustic_msgs::msg::SonarImageData::DTYPE_UINT8 &&
           sonar_image_proc::gpu::available()) {
         const int n_ranges = interface.nRanges();
@@ -232,7 +263,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
           rect_mat.create(cv::Size(n_ranges, n_bearings), CV_8UC3);
           sonar_mat.create(cv::Size(geom.width, geom.height), CV_8UC3);
           gpu_drawn = sonar_image_proc::gpu::drawSonar(
-              msg->image.data.data(), n_ranges, n_bearings,
+              working_msg->image.data.data(), n_ranges, n_bearings,
               interface.minRange(), interface.maxRange(),
               interface.azimuths().data(), sonar_drawer_.pixelsPerMeter(),
               lut_.data(), rect_mat.data, geom, sonar_mat.data);
@@ -247,18 +278,18 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       // aka (rotated 90 degrees CCW)
       cv::Mat rotated_rect;
       cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
-      cvBridgeAndPublish(msg, rotated_rect, rect_pub_);
+      cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
 
       rect_elapsed = this->get_clock()->now() - begin;
       begin = this->get_clock()->now();
 
       if (!gpu_drawn)
         sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
-      cvBridgeAndPublish(msg, sonar_mat, pub_);
+      cvBridgeAndPublish(working_msg, sonar_mat, pub_);
 
       if (osd_pub_->get_subscription_count() > 0) {
         cv::Mat osd_mat = sonar_drawer_.drawOverlay(interface, sonar_mat);
-        cvBridgeAndPublish(msg, osd_mat, osd_pub_);
+        cvBridgeAndPublish(working_msg, osd_mat, osd_pub_);
       }
 
       map_elapsed = this->get_clock()->now() - begin;
