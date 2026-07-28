@@ -6,8 +6,12 @@
 
 #pragma once
 
-#include <vector>
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "marine_acoustic_msgs/msg/projected_sonar_image.hpp"
 #include "sonar_image_proc/AbstractSonarInterface.h"
@@ -21,8 +25,14 @@ using std::vector;
 struct SonarImageMsgInterface
     : public sonar_image_proc::AbstractSonarInterface {
   explicit SonarImageMsgInterface(
-      const std::shared_ptr<const marine_acoustic_msgs::msg::ProjectedSonarImage> &ping)
-      : _ping(ping), do_log_scale_(false) {
+      const std::shared_ptr<
+          const marine_acoustic_msgs::msg::ProjectedSonarImage> &ping)
+      : _ping(ping),
+        _dataSize(0),
+        do_log_scale_(false),
+        min_db_(0.0),
+        max_db_(0.0),
+        range_db_(0.0) {
     // Vertical field of view is determined by comparing
     // z / sqrt(x^2 + y^2) to tan(elevation_beamwidth/2)
     _verticalTanSquared =
@@ -37,7 +47,19 @@ struct SonarImageMsgInterface
              ? 0.0f
              : std::pow(std::tan(ping->ping_info.tx_beamwidths[0] / 2.0), 2));
 
-    for (const auto pt : ping->beam_directions) {
+    // Cache the element width once.  index() is called once per pixel, and
+    // re-deriving this from the dtype there put a chain of branches in the
+    // innermost drawing loop.
+    if (_ping->image.dtype == _ping->image.DTYPE_UINT8) {
+      _dataSize = 1;
+    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT16) {
+      _dataSize = 2;
+    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT32) {
+      _dataSize = 4;
+    }
+
+    _ping_azimuths.reserve(ping->beam_directions.size());
+    for (const auto &pt : ping->beam_directions) {
       auto az = atan2(-1 * pt.y, pt.z);
       _ping_azimuths.push_back(az);
     }
@@ -181,24 +203,22 @@ struct SonarImageMsgInterface
   std::vector<float> _ping_azimuths;
 
   size_t index(const AzimuthRangeIndices &idx) const {
-    int data_size;
-    if (_ping->image.dtype == _ping->image.DTYPE_UINT8) {
-      data_size = 1;
-    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT16) {
-      data_size = 2;
-    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT32) {
-      data_size = 4;
-    } else {
-      assert(false);
-    }
+    // _dataSize is 0 for an unrecognized dtype.  The old code left a local
+    // `int data_size` uninitialized on that path, since assert() compiles
+    // away under NDEBUG -- so a release build indexed with garbage.
+    return _dataSize * ((idx.range() * _ping_azimuths.size()) + idx.azimuth());
+  }
 
-    return data_size * ((idx.range() * nBearings()) + idx.azimuth());
+  // True if a whole element of _dataSize bytes starting at i is in bounds.
+  bool indexInBounds(size_t i) const {
+    return (_dataSize > 0) && (i + _dataSize <= _ping->image.data.size());
   }
 
   // "raw" read functions.  Assumes the data type has already been checked
   uint32_t read_uint8(const AzimuthRangeIndices &idx) const {
     assert(_ping->image.dtype == _ping->image.DTYPE_UINT8);
     const auto i = index(idx);
+    if (!indexInBounds(i)) return 0;
 
     return (_ping->image.data[i]);
   }
@@ -206,6 +226,7 @@ struct SonarImageMsgInterface
   uint32_t read_uint16(const AzimuthRangeIndices &idx) const {
     assert(_ping->image.dtype == _ping->image.DTYPE_UINT16);
     const auto i = index(idx);
+    if (!indexInBounds(i)) return 0;
 
     return (static_cast<uint16_t>(_ping->image.data[i]) |
             (static_cast<uint16_t>(_ping->image.data[i + 1]) << 8));
@@ -214,6 +235,7 @@ struct SonarImageMsgInterface
   uint32_t read_uint32(const AzimuthRangeIndices &idx) const {
     assert(_ping->image.dtype == _ping->image.DTYPE_UINT32);
     const auto i = index(idx);
+    if (!indexInBounds(i)) return 0;
 
     const uint32_t v =
         (static_cast<uint32_t>(_ping->image.data[i]) |
@@ -232,7 +254,8 @@ struct SonarImageMsgInterface
         log10(static_cast<float>(std::max((uint)1, intensity)) / UINT32_MAX) *
         10;  // dB
 
-    const float full_min_db = log10(1.0 / UINT32_MAX) * 10;  // full-scale bottom
+    const float full_min_db =
+        log10(1.0 / UINT32_MAX) * 10;  // full-scale bottom
     const float min_db = (min_db_ == 0 ? full_min_db : min_db_);
     // Full-range mode (min_db == max_db == 0) leaves range_db_ == 0; fall back
     // to the full-scale span (0 dB top) instead of dividing by zero.
@@ -240,6 +263,9 @@ struct SonarImageMsgInterface
 
     return std::min(1.0f, std::max(0.0f, (v - min_db) / span));
   }
+
+  // Bytes per intensity sample; 0 if the message dtype is unrecognized
+  size_t _dataSize;
 
   bool do_log_scale_;
   float min_db_, max_db_, range_db_;

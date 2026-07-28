@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include <opencv2/core.hpp>
 
 #include "sonar_image_proc/AbstractSonarInterface.h"
@@ -66,7 +68,12 @@ struct MitchellColorMap : public SonarColorMap {
 // As released under a CC0 license
 struct InfernoColorMap : public SonarColorMap {
   static const float _inferno_data_float[][3];
-  static const float _inferno_data_uint8[][3];
+
+  // The 8-bit table holds integers in [0,255]; storing them as uint8_t
+  // rather than float shrinks it from 3KB to 768B (one cache line per 21
+  // entries) and drops a float->uchar conversion from the innermost
+  // drawing loop.
+  static const uint8_t _inferno_data_uint8[][3];
 
   // Minor optimization ... don't go through the intermediate Scalar
   cv::Vec3b lookup_cv8uc3(const AbstractSonarInterface &ping,

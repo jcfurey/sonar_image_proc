@@ -32,7 +32,9 @@ if __name__ == "__main__":
         print("};")
         print()
 
-        print("const float ColorMap::char_data[%d][3] = {" % len(data))
+        # Emitted as uint8_t, matching the declaration in ColorMaps.h --
+        # these are integers in [0,255] and were previously stored as floats.
+        print("const uint8_t ColorMap::char_data[%d][3] = {" % len(data))
         for entry in data:
             print("{%d,%d,%d}," % (int(entry[0]*255),
                                     int(entry[1]*255),

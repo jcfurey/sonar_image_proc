@@ -5,7 +5,6 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
-
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/DrawSonar.h"
@@ -20,11 +19,26 @@ static float rad2degf(float rad) { return rad * 180.0 / M_PI; }
 
 SonarDrawer::SonarDrawer() : pixels_per_meter_(100.0f), max_range_(0.0f) { ; }
 
-float SonarDrawer::effectiveMaxRange(
-    const AbstractSonarInterface &ping) const {
+float SonarDrawer::effectiveMaxRange(const AbstractSonarInterface &ping) const {
   const float ping_max_range = ping.maxRange();
   if (max_range_ <= 0.0f) return ping_max_range;
   return std::min(max_range_, ping_max_range);
+}
+
+// Fills the rectangular image one azimuth (one row) at a time.  Templated on
+// the pixel type so the type dispatch happens once per image rather than
+// once per pixel.
+template <typename Pixel, typename LookupFn>
+static void fillRectRows(cv::Mat &rect, int nRanges, int nAzimuth,
+                         LookupFn lookup) {
+  for (int b = 0; b < nAzimuth; b++) {
+    // Walking along a row is contiguous in memory; the original
+    // range-major traversal strode the full row pitch on every pixel.
+    Pixel *const row = rect.ptr<Pixel>(b);
+    for (int r = 0; r < nRanges; r++) {
+      row[r] = lookup(AzimuthRangeIndices(b, r));
+    }
+  }
 }
 
 cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
@@ -32,7 +46,9 @@ cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
                                         const cv::Mat &rectIn) {
   cv::Mat rect(rectIn);
 
-  const cv::Size imgSize(ping.nRanges(), ping.nBearings());
+  const int nRanges = ping.nRanges();
+  const int nAzimuth = ping.nAzimuth();
+  const cv::Size imgSize(nRanges, nAzimuth);
 
   if ((rect.type() == CV_8UC3) || (rect.type() == CV_32FC3) ||
       (rect.type() == CV_32FC1)) {
@@ -41,21 +57,31 @@ cv::Mat SonarDrawer::drawRectSonarImage(const AbstractSonarInterface &ping,
     rect.create(imgSize, CV_8UC3);
   }
 
-  for (int r = 0; r < ping.nRanges(); r++) {
-    for (int b = 0; b < ping.nBearings(); b++) {
-      const AzimuthRangeIndices loc(b, r);
+  if ((nRanges <= 0) || (nAzimuth <= 0)) return rect;
 
-      if (rect.type() == CV_8UC3) {
-        rect.at<cv::Vec3b>(cv::Point(r, b)) = colorMap.lookup_cv8uc3(ping, loc);
-      } else if (rect.type() == CV_32FC3) {
-        rect.at<cv::Vec3f>(cv::Point(r, b)) =
-            colorMap.lookup_cv32fc3(ping, loc);
-      } else if (rect.type() == CV_32FC1) {
-        rect.at<float>(cv::Point(r, b)) = colorMap.lookup_cv32fc1(ping, loc);
-      } else {
-        assert("Should never get here.");
-      }
-    }
+  switch (rect.type()) {
+    case CV_8UC3:
+      fillRectRows<cv::Vec3b>(rect, nRanges, nAzimuth,
+                              [&](const AzimuthRangeIndices &loc) {
+                                return colorMap.lookup_cv8uc3(ping, loc);
+                              });
+      break;
+    case CV_32FC3:
+      fillRectRows<cv::Vec3f>(rect, nRanges, nAzimuth,
+                              [&](const AzimuthRangeIndices &loc) {
+                                return colorMap.lookup_cv32fc3(ping, loc);
+                              });
+      break;
+    case CV_32FC1:
+      fillRectRows<float>(rect, nRanges, nAzimuth,
+                          [&](const AzimuthRangeIndices &loc) {
+                            return colorMap.lookup_cv32fc1(ping, loc);
+                          });
+      break;
+    default:
+      // assert() on a string literal is always true, so this never fired
+      assert(false && "Should never get here.");
+      break;
   }
 
   return rect;
@@ -66,6 +92,13 @@ cv::Mat SonarDrawer::remapRectSonarImage(const AbstractSonarInterface &ping,
   cv::Mat out;
   const CachedMap::MapPair maps(
       _map(ping, pixels_per_meter_, effectiveMaxRange(ping)));
+
+  // The map is empty for a degenerate ping -- no ranges, fewer than two
+  // beams, or a non-positive max range.  cv::remap asserts on an empty map,
+  // and the resulting cv::Exception propagates out of the subscription
+  // callback and takes the node down.
+  if (maps.first.empty() || maps.second.empty()) return out;
+
   cv::remap(rectImage, out, maps.first, maps.second, cv::INTER_CUBIC,
             cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
@@ -74,6 +107,10 @@ cv::Mat SonarDrawer::remapRectSonarImage(const AbstractSonarInterface &ping,
 
 cv::Mat SonarDrawer::drawOverlay(const AbstractSonarInterface &ping,
                                  const cv::Mat &sonarImage) {
+  // remapRectSonarImage() returns an empty Mat for a degenerate ping;
+  // overlayImage's CV_Assert would abort on it.
+  if (sonarImage.empty()) return cv::Mat();
+
   // Alpha blend overlay onto sonarImage
   cv::Mat output;
   overlayImage<unsigned char>(
@@ -112,27 +149,32 @@ bool SonarDrawer::Cached::isValid(const AbstractSonarInterface &ping) const {
 
 SonarDrawer::CachedMap::MapPair SonarDrawer::CachedMap::operator()(
     const AbstractSonarInterface &ping, float pixelsPerMeter, float maxRange) {
-  // _scMap[12] are mutable to break out of const
-  if (!isValidFor(ping, pixelsPerMeter, maxRange))
-    create(ping, pixelsPerMeter, maxRange);
+  for (auto &entry : _entries) {
+    if (entry.isValidFor(ping, pixelsPerMeter, maxRange))
+      return std::make_pair(entry._scMap1, entry._scMap2);
+  }
 
-  return std::make_pair(_scMap1, _scMap2);
+  // Miss -- rebuild into the slot that has gone longest without being built.
+  Entry &entry = _entries[_nextEvict];
+  _nextEvict = (_nextEvict + 1) % kNumEntries;
+
+  entry.create(ping, pixelsPerMeter, maxRange);
+  return std::make_pair(entry._scMap1, entry._scMap2);
 }
 
 //  **assumes** this structure for the rectImage:
 //   * It has nBearings cols and nRanges rows
 //
-void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
-                                    float pixelsPerMeter,
-                                    float displayMaxRange) {
+void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
+                                           float pixelsPerMeter,
+                                           float displayMaxRange) {
   cv::Mat newmap;
 
   const auto azimuthBounds = ping.azimuthBounds();
 
   // Calculate image dimensions based on pixels per meter scale factor
   // Height represents maxRange since origin is at the bottom
-  const int height =
-      static_cast<int>(ceil(displayMaxRange * pixelsPerMeter));
+  const int height = static_cast<int>(ceil(displayMaxRange * pixelsPerMeter));
   const int minusWidth =
       static_cast<int>(floor(height * sin(azimuthBounds.first)));
   const int plusWidth =
@@ -164,8 +206,7 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
     int lo = 0, hi = nAz - 1;
     while (hi - lo > 1) {
       const int mid = (lo + hi) / 2;
-      const bool left =
-          ascending ? (azimuths[mid] <= a) : (azimuths[mid] >= a);
+      const bool left = ascending ? (azimuths[mid] <= a) : (azimuths[mid] >= a);
       if (left) {
         lo = mid;
       } else {
@@ -176,40 +217,49 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
     return lo + (std::abs(denom) > 1e-9f ? (a - azimuths[lo]) / denom : 0.0f);
   };
 
-  for (int x = 0; x < newmap.cols; x++) {
-    for (int y = 0; y < newmap.rows; y++) {
-      // For cv::remap, a map is
-      //
-      //  dst = src( mapx(x,y), mapy(x,y) )
-      //
-      // That is, the map is the size of the dst array,
-      // and contains the coords in the source image
-      // for each pixel in the dst image.
-      //
-      // This map draws the sonar with range = 0
-      // centered on the bottom edge of the resulting image
-      // with increasing range along azimuth = 0 going
-      // vertically upwards in the image
+  // Loop invariants.  These were being recomputed inside the innermost loop,
+  // where minRange()/maxRange() are virtual calls into the ping that also
+  // re-check the cached-bounds state -- millions of times per map.
+  const float minRange = ping.minRange();
+  const float sourceMaxRange = ping.maxRange();
+  const float rangeSpan = sourceMaxRange - minRange;
+  const float lastColumn = ping.nRanges() - 1;
+  const int rows = newmap.rows, cols = newmap.cols;
 
+  // For cv::remap, a map is
+  //
+  //  dst = src( mapx(x,y), mapy(x,y) )
+  //
+  // That is, the map is the size of the dst array,
+  // and contains the coords in the source image
+  // for each pixel in the dst image.
+  //
+  // This map draws the sonar with range = 0
+  // centered on the bottom edge of the resulting image
+  // with increasing range along azimuth = 0 going
+  // vertically upwards in the image
+  //
+  // Iterate row-major so the writes run contiguously through newmap.
+  for (int y = 0; y < rows; y++) {
+    cv::Vec2f *const row = newmap.ptr<cv::Vec2f>(y);
+
+    // Constant across the row
+    const float dy = rows - y;
+    const float dySq = dy * dy;
+
+    for (int x = 0; x < cols; x++) {
       // Calculate range and bearing of this pixel from origin
       const float dx = x - originx;
-      const float dy = newmap.rows - y;
 
-      const float range = sqrt(dx * dx + dy * dy);
+      const float range = sqrt(dx * dx + dySq);
       const float azimuth = atan2(dx, dy);
 
       // Map from pixel coordinates to data coordinates in the rect image
-      // rangeInPixels is distance from origin in output image (origin = range 0)
-      // Convert to actual range in meters, then to range bin index
+      // rangeInPixels is distance from origin in output image (origin = range
+      // 0) Convert to actual range in meters, then to range bin index
       const float rangeInPixels = range;  // Distance in pixels from origin
       const float rangeInMeters =
           rangeInPixels / pixelsPerMeter;  // Convert to meters
-
-      // Map range in meters to range bin index
-      // Sonar data spans from minRange to maxRange
-      const float minRange = ping.minRange();
-      const float sourceMaxRange = ping.maxRange();
-      const float rangeSpan = sourceMaxRange - minRange;
 
       // Clamp to valid range and convert to bin index
       float xp;
@@ -221,14 +271,14 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
         // The first and last range values correspond to source columns 0 and
         // n-1. Multiplying by n mapped maxRange one column past the image,
         // blackening the outer edge and shifting every intermediate sample.
-        xp = rangeFraction * (ping.nRanges() - 1);
+        xp = rangeFraction * lastColumn;
       }
 
       // Interpolate against the real (non-uniform) bearing table; -1 (outside
       // the fan) lands out-of-bounds so cv::remap's BORDER_CONSTANT blacks it.
       const float yp = azToIndex(azimuth);
 
-      newmap.at<cv::Vec2f>(cv::Point(x, y)) = cv::Vec2f(xp, yp);
+      row[x] = cv::Vec2f(xp, yp);
     }
   }
 
@@ -245,9 +295,9 @@ void SonarDrawer::CachedMap::create(const AbstractSonarInterface &ping,
   _azimuths = azimuths;
 }
 
-bool SonarDrawer::CachedMap::isValidFor(const AbstractSonarInterface &ping,
-                                        float pixelsPerMeter,
-                                        float maxRange) const {
+bool SonarDrawer::CachedMap::Entry::isValidFor(
+    const AbstractSonarInterface &ping, float pixelsPerMeter,
+    float maxRange) const {
   if (_scMap1.empty() || _scMap2.empty()) return false;
 
   // Check if pixels per meter has changed
@@ -260,9 +310,10 @@ bool SonarDrawer::CachedMap::isValidFor(const AbstractSonarInterface &ping,
 
 // === SonarDrawer::CachedOverlay ===
 
-bool SonarDrawer::CachedOverlay::isValidFor(
-    const AbstractSonarInterface &ping, const cv::Mat &sonarImage,
-    const OverlayConfig &config, float maxRange) const {
+bool SonarDrawer::CachedOverlay::isValidFor(const AbstractSonarInterface &ping,
+                                            const cv::Mat &sonarImage,
+                                            const OverlayConfig &config,
+                                            float maxRange) const {
   if (sonarImage.size() != _overlay.size()) return false;
 
   if (_config_used != config) return false;
