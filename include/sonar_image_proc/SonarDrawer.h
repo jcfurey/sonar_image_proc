@@ -118,6 +118,21 @@ class SonarDrawer {
   // maxPixelsPerMeter().
   float effectivePixelsPerMeter(const AbstractSonarInterface &ping) const;
 
+  // Pixel geometry of the Cartesian fan for this ping. The sonar origin sits
+  // at (origin_x, height) -- range zero is the bottom edge.
+  //
+  // Exposed so consumers can be told the pixel<->metre mapping instead of
+  // assuming it. They used to assume: sonar_optical_flow carried its own
+  // pixels_per_meter and divided pixel displacement by it, which was silently
+  // wrong by up to 5x once the fan started being scaled per ping.
+  struct FanGeometry {
+    int width = 0;
+    int height = 0;
+    int origin_x = 0;
+    float pixels_per_meter = 0.0f;
+  };
+  FanGeometry fanImageGeometry(const AbstractSonarInterface &ping) const;
+
   // Limit the Cartesian fan to this range in meters. A non-positive value
   // uses the full range reported by the ping. The rectangular source image is
   // intentionally unaffected.
