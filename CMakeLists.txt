@@ -208,6 +208,13 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_draw_sonar test/unit/test_draw_sonar.cpp)
   target_link_libraries(test_draw_sonar sonar_image_proc)
+
+  # The ROS message interface lives under ros/include and needs the message
+  # package; the core library target does not carry either.
+  ament_add_gtest(test_msg_interface test/unit/test_msg_interface.cpp)
+  target_include_directories(test_msg_interface PRIVATE ros/include)
+  target_link_libraries(test_msg_interface sonar_image_proc)
+  ament_target_dependencies(test_msg_interface marine_acoustic_msgs geometry_msgs)
 endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

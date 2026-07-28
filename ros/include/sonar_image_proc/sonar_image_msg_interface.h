@@ -135,7 +135,7 @@ struct SonarImageMsgInterface
   //
   // If the underlying data is 16-bit, it returns a scaled value.
   uint8_t intensity_uint8(const AzimuthRangeIndices &idx) const override {
-    if (do_log_scale_ && (_ping->image.dtype == _ping->image.DTYPE_UINT32)) {
+    if (do_log_scale_) {
       return intensity_float_log(idx) * UINT8_MAX;
     }
 
@@ -152,7 +152,7 @@ struct SonarImageMsgInterface
 
   uint16_t intensity_uint16(const AzimuthRangeIndices &idx) const override {
     // Truncate 32bit intensities
-    if (do_log_scale_ && (_ping->image.dtype == _ping->image.DTYPE_UINT32)) {
+    if (do_log_scale_) {
       return intensity_float_log(idx) * UINT16_MAX;
     }
 
@@ -167,7 +167,7 @@ struct SonarImageMsgInterface
   }
 
   uint32_t intensity_uint32(const AzimuthRangeIndices &idx) const override {
-    if (do_log_scale_ && (_ping->image.dtype == _ping->image.DTYPE_UINT32)) {
+    if (do_log_scale_) {
       return intensity_float_log(idx) * UINT32_MAX;
     }
 
@@ -182,18 +182,11 @@ struct SonarImageMsgInterface
   }
 
   float intensity_float(const AzimuthRangeIndices &idx) const override {
-    if (do_log_scale_ && (_ping->image.dtype == _ping->image.DTYPE_UINT32)) {
+    if (do_log_scale_) {
       return intensity_float_log(idx);
     }
 
-    if (_ping->image.dtype == _ping->image.DTYPE_UINT8) {
-      return static_cast<float>(read_uint8(idx)) / UINT8_MAX;
-    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT16) {
-      return static_cast<float>(read_uint16(idx)) / UINT16_MAX;
-    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT32) {
-      return static_cast<float>(read_uint32(idx)) / UINT32_MAX;
-    }
-    return 0.0;
+    return intensity_float_linear(idx);
   }
 
  protected:
@@ -245,17 +238,43 @@ struct SonarImageMsgInterface
     return v;
   }
 
+  // Linear, dtype-normalised intensity in [0,1]. Split out so the log path can
+  // reuse it: it previously read raw uint32, which asserts on the dtype, so
+  // log scaling had to be gated to 32-bit data and was a silent no-op for the
+  // 8- and 16-bit pings this driver actually produces.
+  float intensity_float_linear(const AzimuthRangeIndices &idx) const {
+    if (_ping->image.dtype == _ping->image.DTYPE_UINT8) {
+      return static_cast<float>(read_uint8(idx)) / UINT8_MAX;
+    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT16) {
+      return static_cast<float>(read_uint16(idx)) / UINT16_MAX;
+    } else if (_ping->image.dtype == _ping->image.DTYPE_UINT32) {
+      return static_cast<float>(read_uint32(idx)) / UINT32_MAX;
+    }
+    return 0.0f;
+  }
+
+  // One least-significant bit, normalised. This is the true noise floor of the
+  // sample type and the bottom of the usable dB window: -24 dB for 8-bit,
+  // -48 dB for 16-bit, -96 dB for 32-bit. A min_db below it just wastes output
+  // range on levels the data cannot represent.
+  float lsb_normalised() const {
+    if (_ping->image.dtype == _ping->image.DTYPE_UINT8) return 1.0f / UINT8_MAX;
+    if (_ping->image.dtype == _ping->image.DTYPE_UINT16)
+      return 1.0f / UINT16_MAX;
+    if (_ping->image.dtype == _ping->image.DTYPE_UINT32)
+      return 1.0f / UINT32_MAX;
+    return 1.0f;
+  }
+
   float intensity_float_log(const AzimuthRangeIndices &idx) const {
-    const auto intensity = read_uint32(idx);
+    const float floor_norm = lsb_normalised();
+    const float norm = std::max(intensity_float_linear(idx), floor_norm);
     // dB relative to full scale, base-10 (the class's dB convention — the
     // docstring's worked examples are 10*log10, not natural log). Using log10
     // makes the min_db/max_db window a true-decibel range.
-    const float v =
-        log10(static_cast<float>(std::max((uint)1, intensity)) / UINT32_MAX) *
-        10;  // dB
+    const float v = log10(norm) * 10;  // dB
 
-    const float full_min_db =
-        log10(1.0 / UINT32_MAX) * 10;  // full-scale bottom
+    const float full_min_db = log10(floor_norm) * 10;  // full-scale bottom
     const float min_db = (min_db_ == 0 ? full_min_db : min_db_);
     // Full-range mode (min_db == max_db == 0) leaves range_db_ == 0; fall back
     // to the full-scale span (0 dB top) instead of dividing by zero.

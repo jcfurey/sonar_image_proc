@@ -2,6 +2,7 @@
 // Author: Aaron Marburg
 // Ported to ROS 2 by GitHub Copilot
 
+#include <cmath>
 #include "sonar_image_proc/draw_sonar_component.hpp"
 
 #include <chrono>
@@ -80,12 +81,14 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     input_image_layout_ =
         this->get_parameter("input_image_layout").as_string();
 
-    std::string color_map_name = this->get_parameter("color_map").as_string();
-    setColorMap(color_map_name);
-
+    // Read the log-scale window BEFORE setColorMap: the GPU LUT folds the log
+    // transform into its own index, so it has to be built with these known.
     log_scale_ = this->get_parameter("log_scale").as_bool();
     min_db_ = this->get_parameter("min_db").as_double();
     max_db_ = this->get_parameter("max_db").as_double();
+
+    std::string color_map_name = this->get_parameter("color_map").as_string();
+    setColorMap(color_map_name);
 
     // Set the pixels per meter scale factor for the sonar drawer
     float pixels_per_meter = this->get_parameter("pixels_per_meter").as_double();
@@ -350,10 +353,29 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // GPU LUT: the active colormap evaluated per uint8 intensity, matching
     // the CPU lookup_cv8uc3 arithmetic (truncating float->uchar conversion,
     // NOT saturate_cast rounding — the CPU maps convert implicitly)
+    // The GPU path indexes this LUT with the raw uint8 sample and never calls
+    // the interface accessors, so log scaling has to be baked in here or it is
+    // silently ignored on that path. Folding it into the index is exact,
+    // because the transform is a monotonic function of the sample value alone.
+    // Mirrors intensity_float_log() for 8-bit data: one LSB is 1/255, so the
+    // full-scale bottom is 10*log10(1/255) = -24.07 dB.
+    const auto log_index = [this](int i) -> int {
+      if (!log_scale_) return i;
+      constexpr float kLsb = 1.0f / UINT8_MAX;
+      const float norm = std::max(static_cast<float>(i) / UINT8_MAX, kLsb);
+      const float v = std::log10(norm) * 10.0f;
+      const float full_min_db = std::log10(kLsb) * 10.0f;
+      const float min_db = (min_db_ == 0 ? full_min_db : min_db_);
+      const float span = ((max_db_ - min_db_) != 0 ? (max_db_ - min_db_)
+                                                   : -full_min_db);
+      const float f = std::min(1.0f, std::max(0.0f, (v - min_db) / span));
+      return static_cast<int>(f * UINT8_MAX);
+    };
+
     lut_valid_ = false;
     if (color_map_name == "mitchell") {
       for (int i = 0; i < 256; ++i) {
-        const float f = static_cast<float>(i) / UINT8_MAX;
+        const float f = static_cast<float>(log_index(i)) / UINT8_MAX;
         lut_[3 * i + 0] = static_cast<uchar>((1.0f - f) * 255.0f);
         lut_[3 * i + 1] = static_cast<uchar>(f * 255.0f);
         lut_[3 * i + 2] = static_cast<uchar>(f * 255.0f);
@@ -363,7 +385,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       for (int i = 0; i < 256; ++i)
         for (int c = 0; c < 3; ++c)
           lut_[3 * i + c] = cv::saturate_cast<uchar>(
-              InfernoColorMap::_inferno_data_uint8[i][c]);
+              InfernoColorMap::_inferno_data_uint8[log_index(i)][c]);
       if (color_map_name == "inferno_saturation") {
         lut_[3 * 255 + 0] = 0;
         lut_[3 * 255 + 1] = 255;
