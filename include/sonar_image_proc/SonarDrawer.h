@@ -92,10 +92,31 @@ class SonarDrawer {
 
   SonarDrawer();
 
-  // Set the scale factor for output image (pixels per meter)
-  // Default is 100 pixels/meter
+  // Set the scale factor for the output fan image, in pixels per meter.
+  //
+  // A non-positive value selects "native": scale each ping so one output pixel
+  // along the radius corresponds to one range bin, i.e. ppm = nRanges /
+  // maxRange. This is usually what you want, because the sonar changes its
+  // range resolution with the commanded range -- an M3000d at a 1 m range
+  // produces ~2 mm bins, and rendering those at a fixed 100 px/m discards
+  // about 80% of the radial resolution, while at 5 m the bins are ~8 mm and
+  // 100 px/m is about right. Native tracks it automatically.
+  //
+  // Note the output height in native mode is simply nRanges, so image size is
+  // bounded by the ping rather than by the commanded range.
   void setPixelsPerMeter(float ppm) { pixels_per_meter_ = ppm; }
   float pixelsPerMeter() const { return pixels_per_meter_; }
+
+  // Upper bound applied to the native scale, in pixels per meter.
+  // Non-positive means unbounded. Only meaningful when pixelsPerMeter() is
+  // non-positive; an explicit scale is always honoured as given.
+  void setMaxPixelsPerMeter(float ppm) { max_pixels_per_meter_ = ppm; }
+  float maxPixelsPerMeter() const { return max_pixels_per_meter_; }
+
+  // The scale actually used for this ping: the explicit value when one is
+  // set, otherwise the ping's native radial sampling subject to
+  // maxPixelsPerMeter().
+  float effectivePixelsPerMeter(const AbstractSonarInterface &ping) const;
 
   // Limit the Cartesian fan to this range in meters. A non-positive value
   // uses the full range reported by the ping. The rectangular source image is
@@ -143,6 +164,7 @@ class SonarDrawer {
  private:
   OverlayConfig overlay_config_;
   float pixels_per_meter_;
+  float max_pixels_per_meter_;
   float max_range_;
 
   // Utility class which can generate and store the two cv::Mats

@@ -156,4 +156,69 @@ TEST(TestDrawSonar, ChangedInteriorAzimuthInvalidatesCachedMap) {
   EXPECT_GT(cv::norm(first, second, cv::NORM_INF), 0.1);
 }
 
+// The sonar changes its range resolution with the commanded range, so the
+// default scale is "native": one output pixel per range bin. These pin the
+// behaviour the deployed draw_sonar.yaml now relies on.
+
+TEST(TestDrawSonar, NativeScaleIsOnePixelPerRangeBin) {
+  // 5 bins spanning 0..4 m -> native scale is 5/4 = 1.25 px/m.
+  TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, {-0.5f, 0.0f, 0.5f});
+
+  sonar_image_proc::SonarDrawer drawer;  // default: native
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(ping), 5.0f / 4.0f);
+}
+
+TEST(TestDrawSonar, NativeOutputHeightTracksRangeBinCount) {
+  // The point of the native scale: height follows the ping's bin count rather
+  // than the commanded range, so the fan does not shrink as the range pulls in.
+  const std::vector<float> az{-0.5f, 0.0f, 0.5f};
+  TestPing near_ping({0.0f, 0.25f, 0.5f, 0.75f, 1.0f}, az);  // 1 m, 5 bins
+  TestPing far_ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, az);     // 4 m, 5 bins
+
+  cv::Mat rect = cv::Mat::zeros(3, 5, CV_32FC1);
+  rect.row(1).setTo(1.0f);
+
+  sonar_image_proc::SonarDrawer drawer;
+  const cv::Mat near_fan = drawer.remapRectSonarImage(near_ping, rect);
+  const cv::Mat far_fan = drawer.remapRectSonarImage(far_ping, rect);
+
+  ASSERT_FALSE(near_fan.empty());
+  ASSERT_FALSE(far_fan.empty());
+  // A fixed scale would have made the 1 m fan a quarter the height of the 4 m
+  // one; native makes them the same, because both carry 5 range bins.
+  EXPECT_EQ(near_fan.rows, far_fan.rows);
+}
+
+TEST(TestDrawSonar, ExplicitScaleOverridesNative) {
+  TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, {-0.5f, 0.0f, 0.5f});
+
+  sonar_image_proc::SonarDrawer drawer;
+  drawer.setPixelsPerMeter(37.0f);
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(ping), 37.0f);
+
+  // ... and an explicit value ignores the native cap entirely.
+  drawer.setMaxPixelsPerMeter(5.0f);
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(ping), 37.0f);
+}
+
+TEST(TestDrawSonar, MaxPixelsPerMeterCapsTheNativeScale) {
+  // 5 bins over 0.1 m would be 50 px/m natively.
+  TestPing ping({0.0f, 0.025f, 0.05f, 0.075f, 0.1f}, {-0.5f, 0.0f, 0.5f});
+
+  sonar_image_proc::SonarDrawer drawer;
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(ping), 50.0f);
+
+  drawer.setMaxPixelsPerMeter(20.0f);
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(ping), 20.0f);
+}
+
+TEST(TestDrawSonar, DegeneratePingFallsBackRatherThanDividingByZero) {
+  TestPing empty_ping({}, {-0.5f, 0.0f, 0.5f});
+  TestPing single_bin({1.0f}, {-0.5f, 0.0f, 0.5f});
+
+  sonar_image_proc::SonarDrawer drawer;
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(empty_ping), 100.0f);
+  EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(single_bin), 100.0f);
+}
+
 }  // namespace
