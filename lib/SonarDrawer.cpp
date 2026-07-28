@@ -17,7 +17,31 @@ using sonar_image_proc::AbstractSonarInterface;
 static float deg2radf(float deg) { return deg * M_PI / 180.0; }
 static float rad2degf(float rad) { return rad * 180.0 / M_PI; }
 
-SonarDrawer::SonarDrawer() : pixels_per_meter_(100.0f), max_range_(0.0f) { ; }
+// Default to the native scale (see setPixelsPerMeter): the sonar's range
+// resolution changes with the commanded range, so a fixed scale is only ever
+// right at one range.
+SonarDrawer::SonarDrawer()
+    : pixels_per_meter_(0.0f), max_pixels_per_meter_(0.0f), max_range_(0.0f) {
+  ;
+}
+
+float SonarDrawer::effectivePixelsPerMeter(
+    const AbstractSonarInterface &ping) const {
+  if (pixels_per_meter_ > 0.0f) return pixels_per_meter_;
+
+  // Native: one output pixel per range bin along the radius. Falls back to the
+  // historical fixed scale for a degenerate ping so a bad message cannot
+  // produce a zero-sized or absurd image.
+  constexpr float kFallbackPixelsPerMeter = 100.0f;
+  const float max_range = effectiveMaxRange(ping);
+  const int n_ranges = ping.nRanges();
+  if (max_range <= 0.0f || n_ranges < 2) return kFallbackPixelsPerMeter;
+
+  const float ppm = static_cast<float>(n_ranges) / max_range;
+  if (max_pixels_per_meter_ > 0.0f)
+    return std::min(ppm, max_pixels_per_meter_);
+  return ppm;
+}
 
 float SonarDrawer::effectiveMaxRange(const AbstractSonarInterface &ping) const {
   const float ping_max_range = ping.maxRange();
@@ -91,7 +115,7 @@ cv::Mat SonarDrawer::remapRectSonarImage(const AbstractSonarInterface &ping,
                                          const cv::Mat &rectImage) {
   cv::Mat out;
   const CachedMap::MapPair maps(
-      _map(ping, pixels_per_meter_, effectiveMaxRange(ping)));
+      _map(ping, effectivePixelsPerMeter(ping), effectiveMaxRange(ping)));
 
   // The map is empty for a degenerate ping -- no ranges, fewer than two
   // beams, or a non-positive max range.  cv::remap asserts on an empty map,

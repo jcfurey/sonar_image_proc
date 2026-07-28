@@ -56,7 +56,13 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     this->declare_parameter("log_scale", false);
     this->declare_parameter("min_db", -80.0);
     this->declare_parameter("max_db", 0.0);
-    this->declare_parameter("pixels_per_meter", 100.0);
+    // 0 (or negative) selects the native scale: one output pixel per range
+    // bin, recomputed per ping. The sonar changes its range resolution with
+    // the commanded range, so any fixed value is only correct at one range.
+    this->declare_parameter("pixels_per_meter", 0.0);
+    // Upper bound on the native scale. 0 = unbounded, which is safe because
+    // the native output height is exactly nRanges.
+    this->declare_parameter("max_pixels_per_meter", 0.0);
     // marine_acoustic_msgs is beam-major. The rendering library retains its
     // range-major working image; older recorded images can opt into the
     // compatibility layout through bringup.
@@ -83,9 +89,19 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
 
     // Set the pixels per meter scale factor for the sonar drawer
     float pixels_per_meter = this->get_parameter("pixels_per_meter").as_double();
+    float max_pixels_per_meter =
+        this->get_parameter("max_pixels_per_meter").as_double();
     sonar_drawer_.setPixelsPerMeter(pixels_per_meter);
+    sonar_drawer_.setMaxPixelsPerMeter(max_pixels_per_meter);
     sonar_drawer_.setMaxRange(max_range_);
-    RCLCPP_INFO(this->get_logger(), "Using pixels_per_meter: %f", pixels_per_meter);
+    if (pixels_per_meter > 0.0f) {
+      RCLCPP_INFO(this->get_logger(), "Using fixed pixels_per_meter: %f",
+                  pixels_per_meter);
+    } else {
+      RCLCPP_INFO(this->get_logger(),
+                  "Using native pixels_per_meter (one pixel per range bin)%s",
+                  max_pixels_per_meter > 0.0f ? ", capped" : "");
+    }
 
     // Configure sonar drawer overlay
     double range_spacing = this->get_parameter("range_spacing").as_double();
@@ -255,9 +271,10 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         const auto az = interface.azimuthBounds();
         const float display_max_range =
             sonar_drawer_.effectiveMaxRange(interface);
+        const float draw_ppm =
+            sonar_drawer_.effectivePixelsPerMeter(interface);
         const auto geom = sonar_image_proc::gpu::fanGeometry(
-            display_max_range, az.first, az.second,
-            sonar_drawer_.pixelsPerMeter());
+            display_max_range, az.first, az.second, draw_ppm);
         if (n_ranges > 0 && n_bearings > 0 && geom.width > 0 &&
             geom.height > 0) {
           rect_mat.create(cv::Size(n_ranges, n_bearings), CV_8UC3);
@@ -265,7 +282,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
           gpu_drawn = sonar_image_proc::gpu::drawSonar(
               working_msg->image.data.data(), n_ranges, n_bearings,
               interface.minRange(), interface.maxRange(),
-              interface.azimuths().data(), sonar_drawer_.pixelsPerMeter(),
+              interface.azimuths().data(), draw_ppm,
               lut_.data(), rect_mat.data, geom, sonar_mat.data);
         }
       }
