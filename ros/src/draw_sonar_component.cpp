@@ -134,6 +134,15 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
 
     // Create publishers
     pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar", 10);
+    // The pixel<->metre mapping of the fan, carried with the image instead of
+    // assumed by each consumer. The fan is an orthographic metric remap, NOT a
+    // perspective projection: fx = fy = pixels per metre, (cx, cy) is the
+    // sonar origin, D is empty and R is identity. Do not run image_proc
+    // rectification against it -- there is no lens model here to undistort.
+    // It exists because the scale is per-ping once the fan is scaled to the
+    // ping's native range resolution.
+    camera_info_pub_ =
+        this->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 10);
     osd_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_osd", 10);
     rect_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_rect", 10);
 
@@ -306,6 +315,25 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       if (!gpu_drawn)
         sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
       cvBridgeAndPublish(working_msg, sonar_mat, pub_);
+
+      // Same stamp and frame as the image it describes.
+      {
+        const auto geom = sonar_drawer_.fanImageGeometry(interface);
+        sensor_msgs::msg::CameraInfo info;
+        info.header = working_msg->header;
+        info.width = geom.width;
+        info.height = geom.height;
+        info.distortion_model = "";
+        info.d.clear();
+        info.k = {geom.pixels_per_meter, 0.0, static_cast<double>(geom.origin_x),
+                  0.0, geom.pixels_per_meter, static_cast<double>(geom.height),
+                  0.0, 0.0, 1.0};
+        info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+        info.p = {geom.pixels_per_meter, 0.0, static_cast<double>(geom.origin_x),
+                  0.0, 0.0, geom.pixels_per_meter,
+                  static_cast<double>(geom.height), 0.0, 0.0, 0.0, 1.0, 0.0};
+        camera_info_pub_->publish(info);
+      }
 
       if (osd_pub_->get_subscription_count() > 0) {
         cv::Mat osd_mat = sonar_drawer_.drawOverlay(interface, sonar_mat);

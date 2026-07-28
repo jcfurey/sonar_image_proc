@@ -49,6 +49,25 @@ float SonarDrawer::effectiveMaxRange(const AbstractSonarInterface &ping) const {
   return std::min(max_range_, ping_max_range);
 }
 
+SonarDrawer::FanGeometry SonarDrawer::fanImageGeometry(
+    const AbstractSonarInterface &ping) const {
+  // Mirrors CachedMap::Entry::create() below -- keep the two in step, they
+  // describe the same image.
+  FanGeometry g;
+  g.pixels_per_meter = effectivePixelsPerMeter(ping);
+  const float max_range = effectiveMaxRange(ping);
+  if (max_range <= 0.0f || g.pixels_per_meter <= 0.0f) return g;
+
+  const auto bounds = ping.azimuthBounds();
+  g.height = static_cast<int>(ceil(max_range * g.pixels_per_meter));
+  const int minus_width =
+      static_cast<int>(floor(g.height * sin(bounds.first)));
+  const int plus_width = static_cast<int>(ceil(g.height * sin(bounds.second)));
+  g.width = plus_width - minus_width;
+  g.origin_x = abs(minus_width);
+  return g;
+}
+
 // Fills the rectangular image one azimuth (one row) at a time.  Templated on
 // the pixel type so the type dispatch happens once per image rather than
 // once per pixel.

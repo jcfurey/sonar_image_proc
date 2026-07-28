@@ -9,6 +9,7 @@
 #include <string>
 #include "rclcpp/rclcpp.hpp"
 #include "marine_acoustic_msgs/msg/projected_sonar_image.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/u_int32_multi_array.hpp"
@@ -37,6 +38,9 @@ class DrawSonarComponent : public rclcpp::Node {
   rclcpp::Subscription<marine_acoustic_msgs::msg::ProjectedSonarImage>::SharedPtr sub_sonar_image_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rect_pub_;
+  // Pixel<->metre mapping of the fan. Published per ping because the scale is
+  // per ping once the fan follows the ping's native range resolution.
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr osd_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr old_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr timing_pub_;
