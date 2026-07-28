@@ -24,8 +24,12 @@ std::vector<unsigned int> HistogramGenerator::GenerateUint8(
     const AbstractSonarInterface &ping) {
   std::vector<unsigned int> result(256, 0);
 
-  for (int r = 0; r < ping.nRanges(); r++) {
-    for (int b = 0; b < ping.nBearings(); b++) {
+  // nRanges()/nAzimuth() call through to a virtual azimuths()/ranges() and
+  // then vector::size(); hoist them out of the loop conditions.
+  const int nRanges = ping.nRanges(), nAzimuth = ping.nAzimuth();
+
+  for (int r = 0; r < nRanges; r++) {
+    for (int b = 0; b < nAzimuth; b++) {
       const auto val = ping.intensity_uint8(AzimuthRangeIndices(b, r));
       result[val]++;
     }
@@ -38,8 +42,10 @@ std::vector<unsigned int> HistogramGenerator::GenerateUint16(
     const AbstractSonarInterface &ping) {
   std::vector<unsigned int> result(65536, 0);
 
-  for (int r = 0; r < ping.nRanges(); r++) {
-    for (int b = 0; b < ping.nBearings(); b++) {
+  const int nRanges = ping.nRanges(), nAzimuth = ping.nAzimuth();
+
+  for (int r = 0; r < nRanges; r++) {
+    for (int b = 0; b < nAzimuth; b++) {
       const auto val = ping.intensity_uint16(AzimuthRangeIndices(b, r));
 
       result[val]++;
@@ -54,9 +60,10 @@ std::vector<unsigned int> HistogramGenerator::GenerateUint32(
   std::vector<unsigned int> result(256, 0);
 
   const float logMax = log10(UINT32_MAX);
+  const int nRanges = ping.nRanges(), nAzimuth = ping.nAzimuth();
 
-  for (int r = 0; r < ping.nRanges(); r++) {
-    for (int b = 0; b < ping.nBearings(); b++) {
+  for (int r = 0; r < nRanges; r++) {
+    for (int b = 0; b < nAzimuth; b++) {
       const auto val = ping.intensity_uint32(AzimuthRangeIndices(b, r));
 
       if (val == 0) continue;

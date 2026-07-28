@@ -4,6 +4,7 @@ Copyright 2023 University of Washington Applied Physics Laboratory
 Author: Marc Micatka & Laura Lindzey
 """
 from __future__ import annotations  # use type of class in member function annotation.
+import ast
 import numpy as np
 import rospy
 
@@ -111,7 +112,16 @@ class SonarFOV:
         # RGB color for wedge
         self.color = rospy.get_param("~color", [0.0, 1.0, 0.0])
         if isinstance(self.color, str):
-            self.color = eval(self.color)
+            # literal_eval, not eval: ~color comes from the parameter server
+            # and eval() would execute whatever it contained.
+            try:
+                self.color = ast.literal_eval(self.color)
+            except (ValueError, SyntaxError):
+                rospy.logwarn(
+                    "Could not parse ~color=%r; using default green."
+                    % (self.color,)
+                )
+                self.color = [0.0, 1.0, 0.0]
 
         self.vector_list = None
         self.sonar_msg_metadata = None

@@ -25,7 +25,17 @@ Bounds_t AbstractSonarInterface::rangeBounds() const {
 
 void AbstractSonarInterface::checkRangeBounds() const {
   if (_rangeBounds == UnsetBounds) {
-    auto results = std::minmax_element(ranges().begin(), ranges().end());
+    const auto &r = ranges();
+
+    // minmax_element on an empty range returns (end(), end()); dereferencing
+    // those is undefined behavior.  A ping with no range bins has no bounds.
+    if (r.empty()) {
+      _rangeBounds = std::make_pair(0.0f, 0.0f);
+      _maxRangeSquared = 0.0f;
+      return;
+    }
+
+    auto results = std::minmax_element(r.begin(), r.end());
     _rangeBounds = std::make_pair(*(results.first), *(results.second));
 
     _maxRangeSquared = _rangeBounds.second * _rangeBounds.second;
@@ -34,7 +44,16 @@ void AbstractSonarInterface::checkRangeBounds() const {
 
 void AbstractSonarInterface::checkAzimuthBounds() const {
   if (_azimuthBounds == UnsetBounds) {
-    auto results = std::minmax_element(azimuths().begin(), azimuths().end());
+    const auto &a = azimuths();
+
+    if (a.empty()) {
+      _azimuthBounds = std::make_pair(0.0f, 0.0f);
+      _minAzimuthTan = 0.0f;
+      _maxAzimuthTan = 0.0f;
+      return;
+    }
+
+    auto results = std::minmax_element(a.begin(), a.end());
     _azimuthBounds = std::make_pair(*(results.first), *(results.second));
 
     _minAzimuthTan = std::tan(_azimuthBounds.first);

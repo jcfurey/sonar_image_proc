@@ -143,7 +143,7 @@ const float InfernoColorMap::_inferno_data_float[256][3] = {
     {0.982257, 0.994109, 0.631017}, {0.988362, 0.998364, 0.644924},
 };
 
-const float InfernoColorMap::_inferno_data_uint8[256][3] = {
+const uint8_t InfernoColorMap::_inferno_data_uint8[256][3] = {
     {0, 0, 3},       {0, 0, 4},       {0, 0, 6},       {1, 0, 7},
     {1, 1, 9},       {1, 1, 11},      {2, 1, 14},      {2, 2, 16},
     {3, 2, 18},      {4, 3, 20},      {4, 3, 22},      {5, 4, 24},

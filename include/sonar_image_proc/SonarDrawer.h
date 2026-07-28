@@ -7,11 +7,11 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
+#include <opencv2/core/core.hpp>
 #include <utility>
 #include <vector>
-
-#include <opencv2/core/core.hpp>
 
 #include "sonar_image_proc/AbstractSonarInterface.h"
 #include "sonar_image_proc/ColorMaps.h"
@@ -156,7 +156,9 @@ class SonarDrawer {
         : _rangeBounds(UnsetBounds),
           _azimuthBounds(UnsetBounds),
           _numRanges(0),
-          _numAzimuth(0) { ; }
+          _numAzimuth(0) {
+      ;
+    }
 
    protected:
     virtual bool isValid(const AbstractSonarInterface &ping) const;
@@ -166,24 +168,43 @@ class SonarDrawer {
     int _numRanges, _numAzimuth;
   };
 
-  struct CachedMap : public Cached {
+  struct CachedMap {
    public:
-    CachedMap() : Cached(), _pixelsPerMeter(0.0f), _maxRange(0.0f) { ; }
+    CachedMap() : _nextEvict(0) { ; }
     typedef std::pair<cv::Mat, cv::Mat> MapPair;
 
     MapPair operator()(const AbstractSonarInterface &ping, float pixelsPerMeter,
                        float maxRange);
 
    private:
-    bool isValidFor(const AbstractSonarInterface &ping, float pixelsPerMeter,
-                    float maxRange) const;
-    void create(const AbstractSonarInterface &ping, float pixelsPerMeter,
-                float maxRange);
+    // The remap tables for one ping geometry.
+    struct Entry : public Cached {
+      Entry() : Cached(), _pixelsPerMeter(0.0f), _maxRange(0.0f) { ; }
 
-    cv::Mat _scMap1, _scMap2;
-    float _pixelsPerMeter;
-    float _maxRange;
-    std::vector<float> _azimuths;
+      bool isValidFor(const AbstractSonarInterface &ping, float pixelsPerMeter,
+                      float maxRange) const;
+      void create(const AbstractSonarInterface &ping, float pixelsPerMeter,
+                  float maxRange);
+
+      cv::Mat _scMap1, _scMap2;
+      float _pixelsPerMeter;
+      float _maxRange;
+      std::vector<float> _azimuths;
+    };
+
+    // Building a remap table is by far the most expensive thing here -- tens
+    // of milliseconds at a wide-field-of-view ping size -- and a
+    // dual-frequency head (e.g. the Oculus M3000d, 130 degrees at 1.2MHz vs
+    // 40 degrees at 3.0MHz) alternates between exactly two geometries.
+    // Holding both means switching frequency costs nothing after the first
+    // ping in each mode.
+    static const size_t kNumEntries = 2;
+
+    std::array<Entry, kNumEntries> _entries;
+
+    // Round-robin eviction.  With kNumEntries slots and kNumEntries
+    // geometries in rotation, every ping after the first in each mode hits.
+    size_t _nextEvict;
   } _map;
 
   struct CachedOverlay : public Cached {

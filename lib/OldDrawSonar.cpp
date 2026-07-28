@@ -2,15 +2,12 @@
 //
 //  Contains the old "legacy" (that is, noticably worse) implementation
 
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/DrawSonar.h"
-
-#ifndef THETA_SHIFT
-#define THETA_SHIFT PI;
-#endif
 
 namespace sonar_image_proc {
 
@@ -41,10 +38,13 @@ cv::Size calculateImageSize(const AbstractSonarInterface &ping, cv::Size hint,
     // Bearings must be radians
     w = 2 * ceil(fabs(h * sin(ping.azimuth(0))));
   } else if (h <= 0) {
-    h = (w / 2) / ceil(fabs(sin(ping.azimuth(0))));
+    const float s = fabs(sin(ping.azimuth(0)));
+    // Guard against a zero-width beam fan (and the integer division that
+    // the previous ceil() made a no-op).
+    h = (s > 0) ? static_cast<int>(ceil((w / 2.0) / s)) : w;
   }
 
-  // Ensure w and h are both divisible by zero
+  // Ensure w and h are both divisible by two
   if (w % 2) w++;
   if (h % 2) h++;
 
@@ -59,7 +59,9 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
   out.setTo(cv::Vec3b(0, 0, 0));
 
   const int nRanges = ping.nRanges();
-  const int nBeams = ping.nBearings();
+  const int nBeams = ping.nAzimuth();
+
+  if ((nRanges <= 0) || (nBeams <= 0)) return out;
 
   const float rangeMax = (maxRange > 0.0 ? maxRange : ping.maxRange());
 
@@ -69,7 +71,8 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
 
   // How many ranges are required to go from 0 to rangeMax (since the
   // sensor starts at some minimum)
-  const int nEffectiveRanges = ceil(rangeMax / rangeRes);
+  const int nEffectiveRanges =
+      std::max(1, static_cast<int>(ceil(rangeMax / rangeRes)));
 
   // Todo.  Calculate offset for non-zero minimum ranges
   const unsigned int radius = mat.size().height;
@@ -80,7 +83,10 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
   // QUESTION: Why the factor of 2?
   // If I understand correctly, binThickness is the width
   // of the range-bin, in pixels.
-  const float binThickness = 2 * ceil(radius / nEffectiveRanges);
+  // n.b. the division must be done in floating point -- as an integer
+  // division it truncated first and the ceil() never had anything to round.
+  const float binThickness =
+      2 * ceil(static_cast<double>(radius) / nEffectiveRanges);
 
   struct BearingEntry {
     float begin, center, end;
@@ -126,8 +132,7 @@ cv::Mat drawSonar(const AbstractSonarInterface &ping, const Mat &mat,
       // Assume angles are in image frame x-right, y-down
       cv::ellipse(out, origin, cv::Size(rad, rad), 0, begin * 180 / M_PI,
                   end * 180 / M_PI,
-                  colorMap.lookup_cv8uc3(
-                      ping, AzimuthRangeIndices(b, r)),
+                  colorMap.lookup_cv8uc3(ping, AzimuthRangeIndices(b, r)),
                   binThickness);
     }
   }

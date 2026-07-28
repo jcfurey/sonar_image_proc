@@ -1,3 +1,6 @@
+#pragma once
+
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/core/traits.hpp>
 
@@ -8,8 +11,6 @@ using cv::Vec;
 
 // Adapted from the code sample in the OpenCV documentation:
 // https://docs.opencv.org/4.x/d3/d63/classcv_1_1Mat.html#a33ee3bc402827f587a5ad64b568d6986
-//
-// \todo(@amarburg):  Optimize?  Loop unrolling?
 //
 
 template <typename T>
@@ -30,19 +31,38 @@ void overlayImage(const Mat &bg, const Mat &fg, Mat &dst) {
 
   dst.create(bg.size(), bg.type());
 
-  cv::MatConstIterator_<VF> fit = fg.begin<VF>(), fit_end = fg.end<VF>();
-  cv::MatConstIterator_<VB> bit = bg.begin<VB>();
-  cv::MatIterator_<VB> dst_it = dst.begin<VB>();
+  // Walk rows explicitly rather than through MatIterator_, and collapse to a
+  // single pass when all three are continuous.
+  int rows = bg.rows, cols = bg.cols;
+  if (bg.isContinuous() && fg.isContinuous() && dst.isContinuous()) {
+    cols *= rows;
+    rows = 1;
+  }
 
-  for (; fit != fit_end; ++fit, ++bit, ++dst_it) {
-    const auto fg_pix = *fit;
-    const auto bg_pix = *bit;
+  for (int y = 0; y < rows; y++) {
+    const VF *fit = fg.ptr<VF>(y);
+    const VB *bit = bg.ptr<VB>(y);
+    VB *dst_it = dst.ptr<VB>(y);
 
-    const float alpha = fg_pix[3] * inv_scale;
-    const float beta = 1 - alpha;
-    *dst_it = VB(cv::saturate_cast<T>(fg_pix[0] * alpha + bg_pix[0] * beta),
-                 cv::saturate_cast<T>(fg_pix[1] * alpha + bg_pix[1] * beta),
-                 cv::saturate_cast<T>(fg_pix[2] * alpha + bg_pix[2] * beta));
+    for (int x = 0; x < cols; x++) {
+      const VF fg_pix = fit[x];
+      const VB bg_pix = bit[x];
+
+      // A graphical overlay is overwhelmingly transparent, and a fully
+      // transparent pixel is exactly the background pixel.  Short-circuiting
+      // skips three multiply-adds and three saturate_casts for most pixels.
+      if (fg_pix[3] == 0) {
+        dst_it[x] = bg_pix;
+        continue;
+      }
+
+      const float alpha = fg_pix[3] * inv_scale;
+      const float beta = 1 - alpha;
+      dst_it[x] =
+          VB(cv::saturate_cast<T>(fg_pix[0] * alpha + bg_pix[0] * beta),
+             cv::saturate_cast<T>(fg_pix[1] * alpha + bg_pix[1] * beta),
+             cv::saturate_cast<T>(fg_pix[2] * alpha + bg_pix[2] * beta));
+    }
   }
 }
 
@@ -111,4 +131,4 @@ void overlayImage(const Mat &bg, const Mat &fg, Mat &dst) {
 //   //     }
 //   //   }
 // }
-};  // namespace sonar_image_proc
+}  // namespace sonar_image_proc
