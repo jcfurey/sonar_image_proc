@@ -4,7 +4,10 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import (
+    EnvironmentVariable,
+    LaunchConfiguration,
+)
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
@@ -20,6 +23,11 @@ def generate_launch_description():
         'namespace',
         default_value='',
         description='Namespace for the draw_sonar node'
+    )
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value=EnvironmentVariable('use_sim_time', default_value='False'),
+        description='Use the /clock topic for ROS time',
     )
 
     sonar_topic_arg = DeclareLaunchArgument(
@@ -78,6 +86,7 @@ def generate_launch_description():
 
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
+    use_sim_time = LaunchConfiguration('use_sim_time')
     sonar_topic = LaunchConfiguration('sonar_topic')
     params_file = LaunchConfiguration('params_file')
     use_composition = LaunchConfiguration('use_composition')
@@ -110,6 +119,7 @@ def generate_launch_description():
                 'min_db': -80.0,
                 'max_db': 0.0,
             }]
+        draw_sonar_params.append({'use_sim_time': use_sim_time})
 
         draw_sonar_component = ComposableNode(
             package='sonar_image_proc',
@@ -149,6 +159,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         namespace_arg,
+        use_sim_time_arg,
         sonar_topic_arg,
         params_file_arg,
         use_composition_arg,
