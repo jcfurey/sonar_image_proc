@@ -214,7 +214,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_msg_interface test/unit/test_msg_interface.cpp)
   target_include_directories(test_msg_interface PRIVATE ros/include)
   target_link_libraries(test_msg_interface sonar_image_proc)
-  ament_target_dependencies(test_msg_interface marine_acoustic_msgs geometry_msgs)
+  sonar_target_dependencies(test_msg_interface marine_acoustic_msgs geometry_msgs)
 endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
