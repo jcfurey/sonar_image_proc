@@ -4,7 +4,10 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import (
+    EnvironmentVariable,
+    LaunchConfiguration,
+)
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
@@ -25,6 +28,11 @@ def generate_launch_description():
         'namespace',
         default_value='',
         description='Top-level namespace for the nodes'
+    )
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value=EnvironmentVariable('use_sim_time', default_value='False'),
+        description='Use the /clock topic for ROS time',
     )
 
     params_file_arg = DeclareLaunchArgument(
@@ -74,6 +82,7 @@ def generate_launch_description():
 
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
+    use_sim_time = LaunchConfiguration('use_sim_time')
     params_file = LaunchConfiguration('params_file')
     use_composition = LaunchConfiguration('use_composition')
     publish_histogram = LaunchConfiguration('publish_histogram')
@@ -102,6 +111,7 @@ def generate_launch_description():
                 'min_db': -80.0,
                 'max_db': 0.0,
             }]
+        draw_sonar_params.append({'use_sim_time': use_sim_time})
 
         raw_draw_sonar = ComposableNode(
             package='sonar_image_proc',
@@ -122,6 +132,7 @@ def generate_launch_description():
             parameters=[{
                 'gain': gain,
                 'gamma': gamma,
+                'use_sim_time': use_sim_time,
             }],
             remappings=[
                 ('sonar_image', '/oculus/sonar_image'),
@@ -175,6 +186,7 @@ def generate_launch_description():
             parameters=[{
                 'gain': gain,
                 'gamma': gamma,
+                'use_sim_time': use_sim_time,
             }],
             remappings=[
                 ('sonar_image', '/oculus/sonar_image'),
@@ -207,6 +219,7 @@ def generate_launch_description():
     # Create and return launch description
     return LaunchDescription([
         namespace_arg,
+        use_sim_time_arg,
         params_file_arg,
         use_composition_arg,
         publish_histogram_arg,
