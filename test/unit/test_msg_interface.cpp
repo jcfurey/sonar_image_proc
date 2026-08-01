@@ -85,6 +85,24 @@ TEST(TestMsgInterface, LogScaleStillWorksForUint32) {
             100);
 }
 
+TEST(TestMsgInterface, OutOfBoundsReadsAreSilentZero) {
+  // The component guards buffer sizes up front, so the interface's own
+  // bounds check is the LAST line of defense; pin that an out-of-range
+  // (azimuth, range) index reads as 0 rather than walking off the buffer
+  // or throwing — and that the guard is per-axis, not just per-product.
+  auto ping = makePing(SonarImageData::DTYPE_UINT8, {10, 20});
+  SonarImageMsgInterface iface(ping);
+  EXPECT_EQ(iface.intensity_uint8(
+                sonar_image_proc::AzimuthRangeIndices(0, 99)), 0);
+  EXPECT_EQ(iface.intensity_uint8(
+                sonar_image_proc::AzimuthRangeIndices(99, 0)), 0);
+  EXPECT_EQ(iface.intensity_uint32(
+                sonar_image_proc::AzimuthRangeIndices(99, 99)), 0u);
+  // in-bounds still reads through
+  EXPECT_GT(iface.intensity_uint8(
+                sonar_image_proc::AzimuthRangeIndices(0, 1)), 0);
+}
+
 TEST(TestMsgInterface, SaturatedLogSampleSurvivesUint32Conversion) {
   // A sample at/above the dB window top clamps intensity_float_log to
   // exactly 1.0f. Multiplying by UINT32_MAX in FLOAT rounded up to 2^32 and
