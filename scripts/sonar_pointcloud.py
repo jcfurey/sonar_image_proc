@@ -114,6 +114,11 @@ class SonarPointcloud(Node):
         self.declare_parameter("min_elev_deg", -10.0)
         self.declare_parameter("max_elev_deg", 10.0)
         self.declare_parameter("frame_id", "")
+        # marine_acoustic_msgs SonarImageData is "row-major (beam_index
+        # major)": flat index = beam * num_ranges + range_bin. The geometry
+        # table below is RANGE-major. Mirrors the draw component's
+        # input_image_layout for drivers that pre-transpose.
+        self.declare_parameter("input_image_layout", "beam_major")
 
         self._load_parameters()
         self.add_on_set_parameters_callback(self._on_parameter_change)
@@ -138,6 +143,8 @@ class SonarPointcloud(Node):
         self.cmin = float(self.get_parameter("cmin").value)
         self.threshold = float(self.get_parameter("threshold").value)
         self.drop_invisible = bool(self.get_parameter("drop_invisible").value)
+        self.input_image_layout = str(
+            self.get_parameter("input_image_layout").value)
 
         elev_steps = int(self.get_parameter("elev_steps").value)
         min_elev = np.radians(
@@ -238,6 +245,15 @@ class SonarPointcloud(Node):
                 return
 
             raw = np.frombuffer(sonar_image_msg.image.data, dtype=data_type)
+            # Transpose a beam-major payload to range-major BEFORE pairing it
+            # with the geometry table: indexing the flat spec-layout buffer
+            # against range-major geometry attached every intensity to a
+            # transposed (range_bin, beam) position, so the thresholded cloud
+            # put bright returns at the wrong 3D points.
+            if self.input_image_layout == "beam_major":
+                raw = raw.reshape(
+                    self.sonar_msg_metadata.num_angles,
+                    self.sonar_msg_metadata.num_ranges).T.reshape(-1)
             dtype_max = np.iinfo(data_type).max
             log_max = np.log(dtype_max)
 
