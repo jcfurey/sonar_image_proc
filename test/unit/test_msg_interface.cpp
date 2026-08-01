@@ -85,6 +85,24 @@ TEST(TestMsgInterface, LogScaleStillWorksForUint32) {
             100);
 }
 
+TEST(TestMsgInterface, SaturatedLogSampleSurvivesUint32Conversion) {
+  // A sample at/above the dB window top clamps intensity_float_log to
+  // exactly 1.0f. Multiplying by UINT32_MAX in FLOAT rounded up to 2^32 and
+  // the out-of-range conversion was UB (typically 0): saturated returns
+  // vanished from the uint32 histogram. The double-cast fix must return
+  // full scale instead.
+  auto ping = makePing(SonarImageData::DTYPE_UINT8, {255, 128});
+  SonarImageMsgInterface logged(ping);
+  logged.do_log_scale(-30.0f, 0.0f);
+  const auto full =
+      logged.intensity_uint32(sonar_image_proc::AzimuthRangeIndices(0, 0));
+  const auto mid =
+      logged.intensity_uint32(sonar_image_proc::AzimuthRangeIndices(0, 1));
+  EXPECT_EQ(full, UINT32_MAX) << "saturated sample must map to full scale";
+  EXPECT_GT(full, mid) << "saturation must stay above a mid-scale sample";
+  EXPECT_GT(mid, 0u);
+}
+
 TEST(TestMsgInterface, LogScaleIsMonotonicAndBounded) {
   auto ping = makePing(SonarImageData::DTYPE_UINT16,
                        {0, 1, 100, 1000, 10000, 65535});
