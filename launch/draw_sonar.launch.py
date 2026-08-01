@@ -77,10 +77,11 @@ def generate_launch_description():
 
     pixels_per_meter_arg = DeclareLaunchArgument(
         'pixels_per_meter',
-        default_value='100.0',
+        default_value='0.0',
         description=(
-            'Output image scale in pixels per meter. Higher values produce '
-            'larger images.'
+            'Output image scale in pixels per meter. 0 (default) scales to '
+            'the ping\'s native range resolution (one pixel per range bin), '
+            'matching the node default; a fixed value overrides it.'
         )
     )
 

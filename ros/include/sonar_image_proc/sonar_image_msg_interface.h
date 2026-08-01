@@ -168,7 +168,12 @@ struct SonarImageMsgInterface
 
   uint32_t intensity_uint32(const AzimuthRangeIndices &idx) const override {
     if (do_log_scale_) {
-      return intensity_float_log(idx) * UINT32_MAX;
+      // double, not float: UINT32_MAX rounds UP to 2^32 as a float, so a
+      // log intensity clamped to exactly 1.0f overflowed the uint32
+      // conversion (UB, typically 0 — saturated returns vanished from the
+      // histogram). Same fix as the base class.
+      return static_cast<uint32_t>(
+          UINT32_MAX * static_cast<double>(intensity_float_log(idx)));
     }
 
     if (_ping->image.dtype == _ping->image.DTYPE_UINT8) {
