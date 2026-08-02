@@ -211,6 +211,13 @@ SonarDrawer::CachedMap::MapPair SonarDrawer::CachedMap::operator()(
 void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
                                            float pixelsPerMeter,
                                            float displayMaxRange) {
+  // Invalidate FIRST: every early return below (degenerate geometry, fewer
+  // than two beams) used to leave the slot's PREVIOUS maps in place, and
+  // operator() returns them unconditionally — so a degenerate ping was
+  // remapped through another geometry's tables instead of yielding the
+  // documented empty Mat.
+  _scMap1.release();
+  _scMap2.release();
   cv::Mat newmap;
 
   const auto azimuthBounds = ping.azimuthBounds();
@@ -384,7 +391,12 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
                                         const OverlayConfig &config,
                                         float maxRange) {
   const cv::Size sz(sonarImage.size());
-  const cv::Point2f origin(sz.width / 2, sz.height);
+  // Same origin_x formula as CachedMap::Entry::create — the old width/2
+  // coincides with it only for a symmetric fan, so the overlay arcs were
+  // drawn about the wrong apex on any asymmetric crop.
+  const int originx = abs(
+      static_cast<int>(floor(sz.height * sin(ping.minAzimuth()))));
+  const cv::Point2f origin(originx, sz.height);
 
   // Reset overlay
   _overlay = cv::Mat::zeros(sz, CV_8UC4);
