@@ -178,16 +178,48 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     }
 
     const std::size_t n_ranges = msg->ranges.size();
-    const std::size_t n_bearings = msg->image.beam_count;
+    // beam_directions is what every consumer downstream indexes by
+    // (interface nBearings(), the GPU stride); image.beam_count is the
+    // producer's claim about the payload stride. A mismatch means the decode
+    // below would silently skew the fan — drop instead. beam_count 0
+    // (pre-a355c65 bags never populated it) defers to beam_directions.
+    const std::size_t n_bearings = msg->beam_directions.size();
+    if (msg->image.beam_count != 0 && msg->image.beam_count != n_bearings) {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Dropping sonar image: image.beam_count %u != %zu beam_directions",
+          msg->image.beam_count, n_bearings);
+      return;
+    }
     std::size_t elem = 0;
     if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
     else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
     else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
+    if (elem == 0) {
+      // FLOAT32 (in the message contract, unsupported here) or garbage: the
+      // interface reads every sample as 0, so this previously published an
+      // all-black fan with no diagnostic on the range_major path.
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Dropping sonar image: unsupported image dtype %u",
+          msg->image.dtype);
+      return;
+    }
 
     auto working_msg = msg;
     if (input_image_layout_ == "beam_major") {
+      // Copy the metadata only: the copy constructor also duplicated
+      // image.data (~0.5 MB per ping at 493x512x2) just for the transpose
+      // below to overwrite it.
       auto range_major =
-          std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>(*msg);
+          std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>();
+      range_major->header = msg->header;
+      range_major->ping_info = msg->ping_info;
+      range_major->beam_directions = msg->beam_directions;
+      range_major->ranges = msg->ranges;
+      range_major->image.is_bigendian = msg->image.is_bigendian;
+      range_major->image.dtype = msg->image.dtype;
+      range_major->image.beam_count = msg->image.beam_count;
       if (!sonar_image_proc::beamMajorToRangeMajor(
               msg->image.data, n_ranges, n_bearings, elem,
               range_major->image.data)) {
@@ -308,19 +340,25 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
 
       // Rotate rectangular image to the more expected format where zero range
       // is at the bottom of the image, with negative azimuth to the right
-      // aka (rotated 90 degrees CCW)
-      cv::Mat rotated_rect;
-      cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
-      cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
+      // aka (rotated 90 degrees CCW). Subscriber-gated like the OSD: it is an
+      // inspection output, and nothing in the deployed workspace consumes it.
+      if (rect_pub_->get_subscription_count() > 0) {
+        cv::Mat rotated_rect;
+        cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
+        cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
+      }
 
       rect_elapsed = SteadyClock::now() - begin;
       begin = SteadyClock::now();
 
       if (!gpu_drawn)
         sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
-      cvBridgeAndPublish(working_msg, sonar_mat, pub_);
 
-      // Same stamp and frame as the image it describes.
+      // Same stamp and frame as the image it describes — and published BEFORE
+      // it (the CameraPublisher convention): consumers latch the latest
+      // camera_info and apply it to the image they are processing, so
+      // image-first ordering handed sonar_optical_flow the PREVIOUS ping's
+      // pixels_per_meter, which moves every ping under native scaling.
       {
         const auto geom = sonar_drawer_.fanImageGeometry(interface);
         sensor_msgs::msg::CameraInfo info;
@@ -338,6 +376,7 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
                   static_cast<double>(geom.height), 0.0, 0.0, 0.0, 1.0, 0.0};
         camera_info_pub_->publish(info);
       }
+      cvBridgeAndPublish(working_msg, sonar_mat, pub_);
 
       if (osd_pub_->get_subscription_count() > 0) {
         cv::Mat osd_mat = sonar_drawer_.drawOverlay(interface, sonar_mat);
@@ -391,23 +430,33 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // because the transform is a monotonic function of the sample value alone.
     // Mirrors intensity_float_log() for 8-bit data: one LSB is 1/255, so the
     // full-scale bottom is 10*log10(1/255) = -24.07 dB.
-    const auto log_index = [this](int i) -> int {
-      if (!log_scale_) return i;
+    // Full-precision fraction, split from the quantized index: the Mitchell
+    // LUT below is computed from the FRACTION on the CPU path
+    // (intensity_float()), so building it from the 8-bit-quantized index here
+    // diverged by up to one count per channel under log scaling.
+    const auto log_fraction = [this](int i) -> float {
+      if (!log_scale_) return static_cast<float>(i) / UINT8_MAX;
       constexpr float kLsb = 1.0f / UINT8_MAX;
       const float norm = std::max(static_cast<float>(i) / UINT8_MAX, kLsb);
       const float v = std::log10(norm) * 10.0f;
       const float full_min_db = std::log10(kLsb) * 10.0f;
       const float min_db = (min_db_ == 0 ? full_min_db : min_db_);
-      const float span = ((max_db_ - min_db_) != 0 ? (max_db_ - min_db_)
-                                                   : -full_min_db);
-      const float f = std::min(1.0f, std::max(0.0f, (v - min_db) / span));
-      return static_cast<int>(f * UINT8_MAX);
+      // Span of the EFFECTIVE window. Computing it from the raw min_db_ made
+      // min_db 0 (auto) with a nonzero max_db yield a NEGATIVE span, which
+      // clamped the whole fan to black. A non-positive effective span
+      // (misconfigured window) falls back to the full scale.
+      float span = max_db_ - min_db;
+      if (!(span > 0.0f)) span = -full_min_db;
+      return std::min(1.0f, std::max(0.0f, (v - min_db) / span));
+    };
+    const auto log_index = [&log_fraction](int i) -> int {
+      return static_cast<int>(log_fraction(i) * UINT8_MAX);
     };
 
     lut_valid_ = false;
     if (color_map_name == "mitchell") {
       for (int i = 0; i < 256; ++i) {
-        const float f = static_cast<float>(log_index(i)) / UINT8_MAX;
+        const float f = log_fraction(i);
         lut_[3 * i + 0] = static_cast<uchar>((1.0f - f) * 255.0f);
         lut_[3 * i + 1] = static_cast<uchar>(f * 255.0f);
         lut_[3 * i + 2] = static_cast<uchar>(f * 255.0f);
@@ -419,9 +468,17 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
           lut_[3 * i + c] = cv::saturate_cast<uchar>(
               InfernoColorMap::_inferno_data_uint8[log_index(i)][c]);
       if (color_map_name == "inferno_saturation") {
-        lut_[3 * 255 + 0] = 0;
-        lut_[3 * 255 + 1] = 255;
-        lut_[3 * 255 + 2] = 0;
+        // The CPU keys the green marker off the POST-log intensity
+        // (ColorMaps.h: intensity_uint8() == 255), so every raw value the log
+        // window saturates must be green here too — overriding only raw 255
+        // diverged for any max_db below 0.
+        for (int i = 0; i < 256; ++i) {
+          if (log_index(i) == UINT8_MAX) {
+            lut_[3 * i + 0] = 0;
+            lut_[3 * i + 1] = 255;
+            lut_[3 * i + 2] = 0;
+          }
+        }
       }
       lut_valid_ = true;
     }

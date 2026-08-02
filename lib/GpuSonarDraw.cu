@@ -15,6 +15,7 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -25,12 +26,35 @@ namespace gpu {
 
 namespace {
 
+// One-way kill switch for sticky context corruption: an illegal address /
+// launch failure / ECC error poisons every subsequent CUDA call in the
+// process, so without this each ping re-attempted the GPU, failed, and
+// printed — an unthrottled stderr flood at sonar rate.
+std::atomic<bool> g_failed{false};
+
 bool check(cudaError_t err, const char* what)
 {
   if (err == cudaSuccess) return true;
   std::fprintf(stderr,
                "sonar_image_proc CUDA error in %s: %s (falling back to CPU)\n",
                what, cudaGetErrorString(err));
+  switch (err) {
+    case cudaErrorIllegalAddress:
+    case cudaErrorLaunchFailure:
+    case cudaErrorECCUncorrectable:
+    case cudaErrorHardwareStackError:
+    case cudaErrorIllegalInstruction:
+    case cudaErrorMisalignedAddress:
+    case cudaErrorInvalidAddressSpace:
+    case cudaErrorInvalidPc:
+      if (!g_failed.exchange(true))
+        std::fprintf(stderr,
+                     "sonar_image_proc: GPU disabled for the rest of this "
+                     "process (sticky CUDA error)\n");
+      break;
+    default:
+      break;
+  }
   return false;
 }
 
@@ -183,7 +207,7 @@ bool available()
     int n = 0;
     return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
   }();
-  return ok;
+  return ok && !g_failed.load(std::memory_order_relaxed);
 }
 
 FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,

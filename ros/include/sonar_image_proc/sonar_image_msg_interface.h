@@ -31,8 +31,7 @@ struct SonarImageMsgInterface
         _dataSize(0),
         do_log_scale_(false),
         min_db_(0.0),
-        max_db_(0.0),
-        range_db_(0.0) {
+        max_db_(0.0) {
     // Vertical field of view is determined by comparing
     // z / sqrt(x^2 + y^2) to tan(elevation_beamwidth/2)
     _verticalTanSquared =
@@ -109,7 +108,6 @@ struct SonarImageMsgInterface
     do_log_scale_ = true;
     min_db_ = min_db;
     max_db_ = max_db;
-    range_db_ = max_db - min_db;
   }
 
   AbstractSonarInterface::DataType_t data_type() const override {
@@ -281,9 +279,13 @@ struct SonarImageMsgInterface
 
     const float full_min_db = log10(floor_norm) * 10;  // full-scale bottom
     const float min_db = (min_db_ == 0 ? full_min_db : min_db_);
-    // Full-range mode (min_db == max_db == 0) leaves range_db_ == 0; fall back
-    // to the full-scale span (0 dB top) instead of dividing by zero.
-    const float span = (range_db_ != 0 ? range_db_ : -full_min_db);
+    // Span of the EFFECTIVE window, not the raw parameters: range_db_
+    // (max_db_ - min_db_) went NEGATIVE for min_db 0 (auto) with a nonzero
+    // max_db and clamped the whole fan to black. A non-positive effective
+    // span (misconfigured window) falls back to the full scale, which also
+    // covers the historical min == max == 0 divide-by-zero case.
+    float span = max_db_ - min_db;
+    if (!(span > 0.0f)) span = -full_min_db;
 
     return std::min(1.0f, std::max(0.0f, (v - min_db) / span));
   }
@@ -292,7 +294,7 @@ struct SonarImageMsgInterface
   size_t _dataSize;
 
   bool do_log_scale_;
-  float min_db_, max_db_, range_db_;
+  float min_db_, max_db_;
 };
 
 }  // namespace sonar_image_proc
