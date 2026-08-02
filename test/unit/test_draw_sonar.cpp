@@ -68,6 +68,42 @@ TEST(TestDrawSonar, RectangularImagePreservesRangeMajorLayout) {
   EXPECT_FLOAT_EQ(rect.at<float>(0, 2), 0.0f);
 }
 
+TEST(TestDrawSonar, GoldenFanHashPinsTheWholeDrawChain) {
+  // Golden regression over the full rect -> remap chain: a deterministic
+  // ping with structure at known (range, azimuth) cells, drawn at a fixed
+  // scale, must produce byte-identical fan pixels. Pins the remap maps,
+  // bin-center conventions, y-axis direction and interpolation in one
+  // number. The hash is specific to the pinned libopencv build (ROS
+  // Jazzy); if a deliberate drawing change or an OpenCV upgrade moves it,
+  // re-bless the constant from the printed value after eyeballing the fan.
+  TestPing ping({0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f},
+                {-0.4f, -0.2f, 0.0f, 0.2f, 0.4f});
+  for (size_t r = 0; r < 8; ++r)
+    for (size_t a = 0; a < 5; ++a)
+      ping.setIntensity(r, a,
+                        0.1f * static_cast<float>(r) +
+                        0.02f * static_cast<float>(a));
+  ping.setIntensity(6, 2, 1.0f);  // a bright target on the boresight
+
+  sonar_image_proc::SonarDrawer drawer;
+  drawer.setPixelsPerMeter(20.0f);
+  const cv::Mat rect = drawer.drawRectSonarImage(
+      ping, sonar_image_proc::SonarColorMap(), cv::Mat(0, 0, CV_32FC1));
+  const cv::Mat fan = drawer.remapRectSonarImage(ping, rect);
+  ASSERT_FALSE(fan.empty());
+  ASSERT_TRUE(fan.isContinuous());
+
+  std::uint64_t h = 1469598103934665603ULL;
+  const std::size_t n = fan.total() * fan.elemSize();
+  for (std::size_t i = 0; i < n; ++i) {
+    h ^= fan.data[i];
+    h *= 1099511628211ULL;
+  }
+  const std::uint64_t kGolden = 0x8358b5cb5dba73f6ULL;
+  EXPECT_EQ(h, kGolden) << "fan hash 0x" << std::hex << h << std::dec
+                        << " (" << fan.rows << "x" << fan.cols << ")";
+}
+
 TEST(TestDrawSonar, MaxRangeClipsFanAndInvalidatesCachedMap) {
   TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f},
                 {-static_cast<float>(M_PI) / 6.0f, 0.0f,
