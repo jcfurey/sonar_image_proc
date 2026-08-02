@@ -195,9 +195,11 @@ ament_python_install_package(${PROJECT_NAME}
   PACKAGE_DIR python/${PROJECT_NAME}
 )
 
+# sonar_fov.py is ROS 1 (rospy, header.seq, positional Point) and fails on
+# first import under ROS 2 — kept in scripts/ as porting reference, but not
+# installed as an executable.
 install(PROGRAMS
   scripts/sonar_pointcloud.py
-  scripts/sonar_fov.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
