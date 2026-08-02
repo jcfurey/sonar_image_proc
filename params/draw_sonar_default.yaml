@@ -46,4 +46,3 @@
     # Publishing options
     publish_histogram: false  # Publish histogram data
     publish_timing: true      # Publish timing information
-    publish_old: false        # Publish using deprecated API
