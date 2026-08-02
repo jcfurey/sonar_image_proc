@@ -187,6 +187,11 @@ class SonarPointcloud(Node):
                 elif param.name == "frame_id":
                     self.frame_id = param.value
 
+                elif param.name == "input_image_layout":
+                    # Previously accepted-and-ignored: the callback reported
+                    # success but never updated the member.
+                    self.input_image_layout = str(param.value)
+
             if elevation_changed:
                 self._load_parameters()
                 self.geometry = None
@@ -242,6 +247,29 @@ class SonarPointcloud(Node):
 
             data_type = self._image_dtype(sonar_image_msg.image)
             if data_type is None:
+                return
+
+            # Validate before touching the payload: np.frombuffer and reshape
+            # both raise on a size mismatch, and an exception here propagates
+            # out of the callback and kills the node (the same failure mode
+            # _image_dtype above deliberately avoids).
+            if self.input_image_layout not in ("beam_major", "range_major"):
+                self.get_logger().error(
+                    f"Dropping sonar image: unknown input_image_layout "
+                    f"'{self.input_image_layout}' "
+                    "(expected beam_major or range_major)")
+                return
+            expected = (self.sonar_msg_metadata.num_angles *
+                        self.sonar_msg_metadata.num_ranges)
+            item_size = np.dtype(data_type).itemsize
+            if len(sonar_image_msg.image.data) != expected * item_size:
+                self.get_logger().error(
+                    f"Dropping sonar image: payload is "
+                    f"{len(sonar_image_msg.image.data)} bytes, expected "
+                    f"{expected * item_size} "
+                    f"({self.sonar_msg_metadata.num_angles} beams x "
+                    f"{self.sonar_msg_metadata.num_ranges} ranges x "
+                    f"{item_size} bytes)")
                 return
 
             raw = np.frombuffer(sonar_image_msg.image.data, dtype=data_type)
