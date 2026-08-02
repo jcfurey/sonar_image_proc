@@ -10,14 +10,32 @@
     log_scale: false
     
     # Intensity range for log scale (in dB)
-    # min_db: Minimum intensity threshold (0.0 = auto, uses ~-96dB)
+    # min_db: Minimum intensity threshold (0.0 = auto, uses the sample type's
+    #         LSB floor: -24 dB for 8-bit, -48 dB for 16-bit, -96 dB for 32-bit)
     # max_db: Maximum intensity threshold (0.0 = auto, uses 0dB)
-    # Example: min_db: -40.0, max_db: 0.0 compresses 40dB range to full display
-    min_db: -80.0
+    # 0.0 (auto) is the only value that can never sit BELOW the sample type's
+    # floor. A min_db below the floor silently washes the image out: -80
+    # against 16-bit data lifts the darkest in-fan pixel to ~101/255 (see the
+    # deployed settings draw_sonar.yaml for the full account).
+    min_db: 0.0
     max_db: 0.0
-    
+
     # Maximum range to display (0.0 = auto, uses full sonar range)
     max_range: 0.0
+
+    # Output fan scale (pixels per meter). 0 = native, one pixel per range
+    # bin, recomputed per ping; max_pixels_per_meter caps the native scale.
+    pixels_per_meter: 0.0
+    max_pixels_per_meter: 0.0
+
+    # Payload layout of the subscribed SonarImageData: beam_major is the
+    # standards-compliant order current drivers emit; range_major matches
+    # pre-fix recordings. Operational launches override this per source.
+    input_image_layout: "beam_major"
+
+    # Draw on the GPU when available (CPU is the automatic fallback;
+    # SONAR_IMAGE_PROC_FORCE_CPU=1 disables at runtime).
+    use_gpu: true
     
     # Overlay grid settings
     range_spacing: 10.0      # Spacing between range circles (meters, 0 for auto)

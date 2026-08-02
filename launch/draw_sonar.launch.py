@@ -117,7 +117,7 @@ def generate_launch_description():
                 'bearing_spacing': 10.0,
                 'line_alpha': 0.5,
                 'line_thickness': 1,
-                'min_db': -80.0,
+                'min_db': 0.0,  # auto: the sample type's LSB floor; -80 washed out 16-bit data
                 'max_db': 0.0,
             }]
         draw_sonar_params.append({'use_sim_time': use_sim_time})
