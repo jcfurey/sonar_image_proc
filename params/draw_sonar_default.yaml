@@ -2,7 +2,7 @@
   ros__parameters:
     # Visualization parameters for draw_sonar node
     
-    # Color map for rendering (options: inferno, hot, jet, etc.)
+    # Color map for rendering (inferno, plus the maps ColorMaps.h actually provides; unknown names fall back to inferno with a warning)
     color_map: "inferno"
     
     # Use logarithmic scale for intensity values (helps with dynamic range)

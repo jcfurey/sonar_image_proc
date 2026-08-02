@@ -54,7 +54,7 @@ def generate_launch_description():
     color_map_arg = DeclareLaunchArgument(
         'color_map',
         default_value='inferno',
-        description='Color map for visualization (inferno, hot, jet, etc.)'
+        description='Color map for visualization (unknown names fall back to inferno)'
     )
 
     log_scale_arg = DeclareLaunchArgument(

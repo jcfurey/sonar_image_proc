@@ -116,7 +116,7 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 - `drawn_sonar_osd` (sensor_msgs/Image): Sonar image with overlay (range/bearing lines)
 - `drawn_sonar_rect` (sensor_msgs/Image): Rectified sonar image
 - `sonar_image_proc_timing` (std_msgs/String): Processing timing information
-- `sonar_histogram` (std_msgs/UInt32MultiArray): Histogram data (if enabled)
+- `histogram` (std_msgs/UInt32MultiArray): Histogram data (if enabled)
 
 ### sonar_postprocessor node:
 - Subscribes to: `sonar_image` (marine_acoustic_msgs/ProjectedSonarImage)
