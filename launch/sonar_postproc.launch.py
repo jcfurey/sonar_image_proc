@@ -102,7 +102,6 @@ def generate_launch_description():
                 'color_map': color_map,
                 'log_scale': log_scale,
                 'max_range': 0.0,
-                'publish_old': False,
                 'publish_timing': True,
                 'range_spacing': 10.0,
                 'bearing_spacing': 10.0,

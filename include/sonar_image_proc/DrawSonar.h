@@ -46,30 +46,4 @@ inline cv::Mat drawSonarRectImage(
   return drawer.drawRectSonarImage(ping, colorMap, rectImage);
 }
 
-namespace old_api {
-
-// === Old / Legacy API below ===
-
-// Given an sonar image, calculates the bounding rectangle required to
-// draw it.   Assumes zero range (the point of the fan) occurs on the
-// bottom edge of the image.
-// Azimuth = 0 is straight ahead from the sonar (the vertical axis in the image)
-// Assuming azimuth = 0 is within the interval of [min azimuth, max azimuth]
-// then the Image height is pixPerRangeBin * (max range in bin / range
-// resolution) Image width is determined by the triangles defined by image
-// height and min/max azimuth
-//
-// If set, maxRange is used in lieu of the ping's native max range,
-// allowing truncation of the image
-cv::Size calculateImageSize(
-    const sonar_image_proc::AbstractSonarInterface &ping, cv::Size hint,
-    int pixPerRangeBin = 2, float maxRange = -1.0);
-
-cv::Mat drawSonar(const sonar_image_proc::AbstractSonarInterface &ping,
-                  const cv::Mat &mat,
-                  const SonarColorMap &colorMap = InfernoColorMap(),
-                  float maxRange = -1.0);
-
-}  // namespace old_api
-
 }  // namespace sonar_image_proc

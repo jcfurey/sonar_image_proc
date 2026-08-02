@@ -111,7 +111,6 @@ def generate_launch_description():
                 'log_scale': log_scale,
                 'max_range': max_range,
                 'pixels_per_meter': pixels_per_meter,
-                'publish_old': False,
                 'publish_timing': True,
                 'range_spacing': 10.0,
                 'bearing_spacing': 10.0,

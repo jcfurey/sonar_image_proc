@@ -42,14 +42,13 @@ class DrawSonarComponent : public rclcpp::Node {
   // per ping once the fan follows the ping's native range resolution.
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr osd_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr old_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr timing_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt32MultiArray>::SharedPtr histogram_pub_;
 
   sonar_image_proc::SonarDrawer sonar_drawer_;
 
   float max_range_;
-  bool publish_old_api_, publish_timing_, publish_histogram_;
+  bool publish_timing_, publish_histogram_;
 
   float min_db_, max_db_;
   bool log_scale_;

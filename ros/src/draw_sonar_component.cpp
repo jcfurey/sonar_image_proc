@@ -48,7 +48,6 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
   {
     // Declare and get parameters
     this->declare_parameter("max_range", 0.0);
-    this->declare_parameter("publish_old", false);
     this->declare_parameter("publish_timing", true);
     this->declare_parameter("publish_histogram", false);
     this->declare_parameter("color_map", "inferno");
@@ -77,7 +76,6 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
 
     max_range_ = this->get_parameter("max_range").as_double();
     use_gpu_ = this->get_parameter("use_gpu").as_bool();
-    publish_old_api_ = this->get_parameter("publish_old").as_bool();
     publish_timing_ = this->get_parameter("publish_timing").as_bool();
     publish_histogram_ = this->get_parameter("publish_histogram").as_bool();
     input_image_layout_ =
@@ -147,9 +145,6 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         this->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 10);
     osd_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_osd", 10);
     rect_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_rect", 10);
-
-    if (publish_old_api_)
-      old_pub_ = this->create_publisher<sensor_msgs::msg::Image>("old_drawn_sonar", 10);
 
     if (publish_timing_)
       timing_pub_ = this->create_publisher<std_msgs::msg::String>("sonar_image_proc_timing", 10);
@@ -266,28 +261,9 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       interface.do_log_scale(min_db_, max_db_);
     }
 
-    Seconds old_api_elapsed = Seconds::zero();
     Seconds rect_elapsed = Seconds::zero();
     Seconds map_elapsed = Seconds::zero();
     Seconds histogram_elapsed = Seconds::zero();
-
-    if (publish_old_api_) {
-      auto begin = SteadyClock::now();
-
-      // Used to be a configurable parameter, but now only meaningful
-      // in the deprecated API
-      const int pix_per_range_bin = 2;
-
-      cv::Size sz = sonar_image_proc::old_api::calculateImageSize(
-          interface, cv::Size(0, 0), pix_per_range_bin, max_range_);
-      cv::Mat mat(sz, CV_8UC3);
-      mat = sonar_image_proc::old_api::drawSonar(interface, mat, *color_map_,
-                                                 max_range_);
-
-      cvBridgeAndPublish(working_msg, mat, old_pub_);
-
-      old_api_elapsed = SteadyClock::now() - begin;
-    }
 
     if (publish_histogram_) {
       auto begin = SteadyClock::now();
@@ -394,7 +370,6 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       output << ", \"rect\" : " << rect_elapsed.count();
       output << ", \"map\" : " << map_elapsed.count();
 
-      if (publish_old_api_) output << ", \"old_api\" : " << old_api_elapsed.count();
       if (publish_histogram_)
         output << ", \"histogram\" : " << histogram_elapsed.count();
 

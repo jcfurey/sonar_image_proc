@@ -57,9 +57,6 @@ draw each sonar image and publish that information to the topic `sonar_image_pro
 as a [std_msgs/String](http://docs.ros.org/en/noetic/api/std_msgs/html/msg/String.html)
 containing a JSON dict.
 
-If the param `publish_old` is `true`, the node will also draw the sonar using
-the old `draw_sonar` algorithm for comparison.
-
 ## Params
 
 If `max_range` is set to a non-zero value, images will be clipped/dropped to that max range (or the actual sonar range, whichever is smaller).
@@ -67,9 +64,6 @@ If `max_range` is set to a non-zero value, images will be clipped/dropped to tha
 If `publish_timing` is `true` the node will publish performance information as a
 JSON [string](http://docs.ros.org/en/noetic/api/std_msgs/html/msg/String.html)
 to the topic `sonar_image_proc_timing`.  Defaults to `true`
-
-If `publish_old` is `true` the node will also draw the sonar using the old
-algorithm to the topic `old_drawn_sonar`.   Defaults to `false`
 
 If `publish_histogram` is `true` the node will publish a "raw" histogram information as a `UInt32MultiArray` to the topic `histogram`.   It contains a vector of unsigned ints giving the count for each intensity value -- so for 8 bit data the vector will be 256 elements in length, and for 16-bit data it will be 65536 elements in length.
 
