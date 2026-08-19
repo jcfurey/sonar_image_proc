@@ -92,14 +92,14 @@ This creates two processing pipelines:
 1. **Raw sonar pipeline** (namespace: `/oculus`)
    - `draw_sonar`: Visualizes raw sonar images
    - Input: `/oculus/sonar_image`
-   - Outputs: `/oculus/drawn_sonar`, `/oculus/drawn_sonar_osd`, `/oculus/drawn_sonar_rect`
+   - Outputs: `/oculus/drawn_sonar`, `/oculus/drawn_sonar_clean`, `/oculus/drawn_sonar_osd`, `/oculus/drawn_sonar_rect`
 
 2. **Postprocessed pipeline** (namespace: `/postprocess`)
    - `sonar_postprocessor`: Applies gain/gamma corrections
    - `draw_sonar`: Visualizes post-processed sonar images
    - Input: `/oculus/sonar_image`
    - Intermediate: `/postprocess/sonar_image`
-   - Outputs: `/postprocess/drawn_sonar`, `/postprocess/drawn_sonar_osd`, `/postprocess/drawn_sonar_rect`
+   - Outputs: `/postprocess/drawn_sonar`, `/postprocess/drawn_sonar_clean`, `/postprocess/drawn_sonar_osd`, `/postprocess/drawn_sonar_rect`
 
 **Example:**
 ```bash
@@ -112,8 +112,9 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 ## Published Topics
 
 ### draw_sonar node outputs:
-- `drawn_sonar` (sensor_msgs/Image): Main rendered sonar image
-- `drawn_sonar_osd` (sensor_msgs/Image): Sonar image with overlay (range/bearing lines)
+- `drawn_sonar` (sensor_msgs/Image): Annotated operator fan with range and bearing labels
+- `drawn_sonar_clean` (sensor_msgs/Image): Annotation-free fan for machine vision
+- `drawn_sonar_osd` (sensor_msgs/Image): Compatibility alias of `drawn_sonar`
 - `drawn_sonar_rect` (sensor_msgs/Image): Rectified sonar image
 - `sonar_image_proc_timing` (std_msgs/String): Processing timing information
 - `histogram` (std_msgs/UInt32MultiArray): Histogram data (if enabled)

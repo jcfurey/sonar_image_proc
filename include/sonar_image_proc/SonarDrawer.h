@@ -42,7 +42,7 @@ class SonarDrawer {
     float DEFAULT_RANGE_SPACING = 0;
 
     float DEFAULT_RADIAL_SPACING = 20;  // degrees
-    bool DEFAULT_RADIAL_AT_ZERO = false;
+    bool DEFAULT_RADIAL_AT_ZERO = true;
 
     float DEFAULT_FONT_SCALE = 1.0;
 

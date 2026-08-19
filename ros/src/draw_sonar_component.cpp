@@ -51,8 +51,10 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     this->declare_parameter("publish_timing", true);
     this->declare_parameter("publish_histogram", false);
     this->declare_parameter("color_map", "inferno");
-    this->declare_parameter("range_spacing", 10.0);
+    this->declare_parameter("range_spacing", 0.0);
     this->declare_parameter("bearing_spacing", 10.0);
+    this->declare_parameter("bearing_at_zero", true);
+    this->declare_parameter("font_scale", 0.8);
     this->declare_parameter("line_alpha", 0.5);
     this->declare_parameter("line_thickness", 1);
     this->declare_parameter("log_scale", false);
@@ -109,12 +111,16 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // Configure sonar drawer overlay
     double range_spacing = this->get_parameter("range_spacing").as_double();
     double bearing_spacing = this->get_parameter("bearing_spacing").as_double();
+    bool bearing_at_zero = this->get_parameter("bearing_at_zero").as_bool();
+    double font_scale = this->get_parameter("font_scale").as_double();
     double line_alpha = this->get_parameter("line_alpha").as_double();
     int line_thickness = this->get_parameter("line_thickness").as_int();
 
     sonar_drawer_.overlayConfig()
         .setRangeSpacing(range_spacing)
         .setRadialSpacing(bearing_spacing)
+        .setRadialAtZero(bearing_at_zero)
+        .setFontScale(font_scale)
         .setLineAlpha(line_alpha)
         .setLineThickness(line_thickness);
 
@@ -133,7 +139,12 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         std::bind(&DrawSonarComponent::sonarImageCallback, this, std::placeholders::_1));
 
     // Create publishers
+    // drawn_sonar is the human/operator contract: it is self-describing when
+    // viewed in a generic image viewer or exported as a still. Algorithms
+    // that must not track the grid subscribe to drawn_sonar_clean instead.
     pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar", 10);
+    clean_pub_ =
+        this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_clean", 10);
     // The pixel<->metre mapping of the fan, carried with the image instead of
     // assumed by each consumer. The fan is an orthographic metric remap, NOT a
     // perspective projection: fx = fy = pixels per metre, (cx, cy) is the
@@ -352,12 +363,17 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
                   static_cast<double>(geom.height), 0.0, 0.0, 0.0, 1.0, 0.0};
         camera_info_pub_->publish(info);
       }
-      cvBridgeAndPublish(working_msg, sonar_mat, pub_);
+      if (clean_pub_->get_subscription_count() > 0)
+        cvBridgeAndPublish(working_msg, sonar_mat, clean_pub_);
 
-      if (osd_pub_->get_subscription_count() > 0) {
-        cv::Mat osd_mat = sonar_drawer_.drawOverlay(interface, sonar_mat);
-        cvBridgeAndPublish(working_msg, osd_mat, osd_pub_);
-      }
+      const cv::Mat annotated_mat =
+          sonar_drawer_.drawOverlay(interface, sonar_mat);
+      cvBridgeAndPublish(working_msg, annotated_mat, pub_);
+
+      // Compatibility alias for existing dashboards. New consumers should
+      // use drawn_sonar (operator) or drawn_sonar_clean (machine vision).
+      if (osd_pub_->get_subscription_count() > 0)
+        cvBridgeAndPublish(working_msg, annotated_mat, osd_pub_);
 
       map_elapsed = SteadyClock::now() - begin;
     }

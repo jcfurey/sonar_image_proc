@@ -3,8 +3,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
+#include <string>
+
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/DrawSonar.h"
@@ -16,6 +20,56 @@ using sonar_image_proc::AbstractSonarInterface;
 
 static float deg2radf(float deg) { return deg * M_PI / 180.0; }
 static float rad2degf(float rad) { return rad * 180.0 / M_PI; }
+
+// OpenCV's built-in fonts do not render a UTF-8 degree symbol reliably, so
+// use an explicit unit. These labels are part of the operator image and must
+// remain readable without a viewer-specific cursor readout or side channel.
+static std::string rangeLabel(float range, float spacing) {
+  int precision = spacing < 0.1f ? 2 : (spacing < 1.0f ? 1 : 0);
+  if (precision == 0 && std::abs(range - std::round(range)) > 0.01f)
+    precision = 1;
+  if (precision == 1 &&
+      std::abs(range * 10.0f - std::round(range * 10.0f)) > 0.01f)
+    precision = 2;
+
+  std::ostringstream text;
+  text << std::fixed << std::setprecision(precision) << range << " m";
+  return text.str();
+}
+
+static std::string bearingLabel(float bearing) {
+  const float degrees = rad2degf(bearing);
+  const bool integral = std::abs(degrees - std::round(degrees)) < 0.05f;
+
+  std::ostringstream text;
+  if (degrees > 0.05f) text << "+";
+  text << std::fixed << std::setprecision(integral ? 0 : 1) << degrees
+       << " deg";
+  return text.str();
+}
+
+static void putOutlinedText(cv::Mat &image, const std::string &text,
+                            const cv::Point2f &center, float fontScale,
+                            const cv::Scalar &color, int lineThickness) {
+  const int textThickness = std::max(1, lineThickness);
+  int baseline = 0;
+  const cv::Size textSize = cv::getTextSize(
+      text, cv::FONT_HERSHEY_PLAIN, fontScale, textThickness, &baseline);
+
+  const int maxX = std::max(0, image.cols - textSize.width - 1);
+  const int minY = std::min(image.rows - 1, textSize.height + 1);
+  const int maxY = std::max(minY, image.rows - baseline - 1);
+  const cv::Point origin(
+      std::clamp(cvRound(center.x - textSize.width / 2.0f), 0, maxX),
+      std::clamp(cvRound(center.y + textSize.height / 2.0f), minY, maxY));
+
+  // A dark halo keeps white annotations legible over strong returns without
+  // hiding a rectangular patch of sonar data behind each label.
+  cv::putText(image, text, origin, cv::FONT_HERSHEY_PLAIN, fontScale,
+              cv::Scalar(0, 0, 0, 230), textThickness + 2, cv::LINE_AA);
+  cv::putText(image, text, origin, cv::FONT_HERSHEY_PLAIN, fontScale, color,
+              textThickness, cv::LINE_AA);
+}
 
 // Default to the native scale (see setPixelsPerMeter): the sonar's range
 // resolution changes with the commanded range, so a fixed scale is only ever
@@ -391,6 +445,12 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
                                         const OverlayConfig &config,
                                         float maxRange) {
   const cv::Size sz(sonarImage.size());
+  _overlay = cv::Mat::zeros(sz, CV_8UC4);
+  if (sz.width <= 0 || sz.height <= 0 || !std::isfinite(maxRange) ||
+      maxRange <= 0.0f) {
+    return;
+  }
+
   // Same origin_x formula as CachedMap::Entry::create — the old width/2
   // coincides with it only for a symmetric fan, so the overlay arcs were
   // drawn about the wrong apex on any asymmetric crop.
@@ -398,12 +458,12 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
       static_cast<int>(floor(sz.height * sin(ping.minAzimuth()))));
   const cv::Point2f origin(originx, sz.height);
 
-  // Reset overlay
-  _overlay = cv::Mat::zeros(sz, CV_8UC4);
   const cv::Vec3b color(config.lineColor());
-  const cv::Vec4b textColor(color[0], color[1], color[2], 255);
+  const cv::Scalar textColor(color[0], color[1], color[2], 255);
   const cv::Vec4b lineColor(color[0], color[1], color[2],
-                            config.lineAlpha() * 255);
+                            cv::saturate_cast<uint8_t>(
+                                std::clamp(config.lineAlpha(), 0.0f, 1.0f) *
+                                255.0f));
 
   const float minAzimuth = ping.minAzimuth();
   const float maxAzimuth = ping.maxAzimuth();
@@ -411,13 +471,13 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
   //== Draw arcs ==
   float arcSpacing = config.rangeSpacing();
 
-  if (arcSpacing <= 0) {
+  if (!std::isfinite(arcSpacing) || arcSpacing <= 0) {
     // Calculate automatically .. just a lame heuristic for now
-    if (maxRange < 2)
+    if (maxRange <= 2)
       arcSpacing = 0.5;
-    else if (maxRange < 5)
+    else if (maxRange <= 5)
       arcSpacing = 1.0;
-    else if (maxRange < 10)
+    else if (maxRange <= 10)
       arcSpacing = 2.0;
     else if (maxRange < 50)
       arcSpacing = 10.0;
@@ -425,9 +485,14 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
       arcSpacing = 20.0;
   }
 
-  const float minRange = arcSpacing;
-
-  for (float r = minRange; r < maxRange; r += arcSpacing) {
+  // Put range values on boresight whenever it is visible. Bearing values live
+  // around the outer arc, so the two scales remain visually distinct. For a
+  // cropped fan that excludes zero, use its angular midpoint instead.
+  const float rangeLabelBearing =
+      (minAzimuth <= 0.0f && maxAzimuth >= 0.0f)
+          ? 0.0f
+          : (minAzimuth + maxAzimuth) / 2.0f;
+  const auto drawRangeArc = [&](float r) {
     const float radiusPix = (r / maxRange) * sonarImage.size().height;
 
     cv::ellipse(_overlay, origin, cv::Size(radiusPix, radiusPix), 0,
@@ -435,29 +500,26 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
                 rad2degf(bearingToImage(maxAzimuth)), lineColor,
                 config.lineThickness());
 
-    {
-      std::stringstream rstr;
-      rstr << r;
+    // Inset range text from its arc enough to separate the maximum-range value
+    // from the 0-degree label. Text placement is also clamped, which keeps it
+    // visible on asymmetric/cropped fans.
+    const float labelInset = std::max(32.0f, 45.0f * config.fontScale());
+    const float labelRadius = std::max(0.0f, radiusPix - labelInset);
+    const float theta = bearingToImage(rangeLabelBearing);
+    const cv::Point2f labelCenter(
+        labelRadius * cos(theta) + origin.x,
+        labelRadius * sin(theta) + origin.y);
+    putOutlinedText(_overlay, rangeLabel(r, arcSpacing), labelCenter,
+                    config.fontScale(), textColor, config.lineThickness());
+  };
 
-      // Calculate location of string
-      const float theta = bearingToImage(minAzimuth);
-
-      // \todo{??} Should calculate this automatically ... not sure
-      const cv::Point2f offset(-25, 20);
-
-      const cv::Point2f pt(radiusPix * cos(theta) + origin.x + offset.x,
-                           radiusPix * sin(theta) + origin.y + offset.y);
-
-      cv::putText(_overlay, rstr.str(), pt, cv::FONT_HERSHEY_PLAIN,
-                  config.fontScale(), textColor);
-    }
+  for (float r = arcSpacing; r < maxRange; r += arcSpacing) {
+    drawRangeArc(r);
   }
 
-  // And one arc at max range
-  cv::ellipse(_overlay, origin, cv::Size(sz.height, sz.height), 0,
-              rad2degf(bearingToImage(minAzimuth)),
-              rad2degf(bearingToImage(maxAzimuth)), lineColor,
-              config.lineThickness());
+  // The displayed maximum is operationally the most important range value.
+  // Draw and label it even when it is not an even multiple of the spacing.
+  drawRangeArc(maxRange);
 
   //== Draw radials ==
   std::vector<float> radials;
@@ -471,7 +533,15 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
   // If radialSpacing == 0. draw only the outline radial lines
   if (radialSpacing > 0) {
     if (config.radialAtZero()) {
-      // \todo(@amarburg) to implement
+      if (minAzimuth < 0.0f && maxAzimuth > 0.0f) radials.push_back(0.0f);
+      for (float d = radialSpacing; d > minAzimuth && d < maxAzimuth;
+           d += radialSpacing) {
+        radials.push_back(d);
+      }
+      for (float d = -radialSpacing; d > minAzimuth && d < maxAzimuth;
+           d -= radialSpacing) {
+        radials.push_back(d);
+      }
     } else {
       for (float d = radialSpacing / 2; d > minAzimuth && d < maxAzimuth;
            d += radialSpacing) {
@@ -486,23 +556,26 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
 
   // Sort and unique
   std::sort(radials.begin(), radials.end());
-  auto last = std::unique(radials.begin(), radials.end());
+  auto last = std::unique(radials.begin(), radials.end(),
+                          [](float lhs, float rhs) {
+                            return std::abs(lhs - rhs) < 1e-5f;
+                          });
   radials.erase(last, radials.end());
 
-  // And draw
-  const float minRangePix = (minRange / maxRange) * sz.height;
+  // Draw full bearing rays from the sonar origin, then label them just inside
+  // the maximum-range arc. This makes the image self-describing even in a
+  // generic image viewer or a screenshot.
+  for (const auto b : radials) {
+    const float theta = bearingToImage(b);
+    const cv::Point2f end(sz.height * cos(theta) + origin.x,
+                          sz.height * sin(theta) + origin.y);
+    cv::line(_overlay, origin, end, lineColor, config.lineThickness());
 
-  if (minRange < maxRange) {
-    for (const auto b : radials) {
-      const float theta = bearingToImage(b);
-
-      const cv::Point2f begin(minRangePix * cos(theta) + origin.x,
-                              minRangePix * sin(theta) + origin.y);
-      const cv::Point2f end(sz.height * cos(theta) + origin.x,
-                            sz.height * sin(theta) + origin.y);
-
-      cv::line(_overlay, begin, end, lineColor, config.lineThickness());
-    }
+    const float labelRadius = std::max(0.0f, sz.height - 18.0f);
+    const cv::Point2f labelCenter(labelRadius * cos(theta) + origin.x,
+                                  labelRadius * sin(theta) + origin.y);
+    putOutlinedText(_overlay, bearingLabel(b), labelCenter,
+                    config.fontScale(), textColor, config.lineThickness());
   }
 
   _config_used = config;
