@@ -257,4 +257,33 @@ TEST(TestDrawSonar, DegeneratePingFallsBackRatherThanDividingByZero) {
   EXPECT_FLOAT_EQ(drawer.effectivePixelsPerMeter(single_bin), 100.0f);
 }
 
+TEST(TestDrawSonar, OverlayAnchorsBearingGridAtZero) {
+  TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f},
+                {-65.0f * static_cast<float>(M_PI) / 180.0f, 0.0f,
+                 65.0f * static_cast<float>(M_PI) / 180.0f});
+
+  sonar_image_proc::SonarDrawer drawer;
+  drawer.setPixelsPerMeter(125.0f);
+  drawer.overlayConfig()
+      .setRangeSpacing(100.0f)  // no internal arc through the test point
+      .setRadialSpacing(10.0f)
+      .setRadialAtZero(true)
+      .setLineAlpha(1.0f)
+      .setFontScale(0.5f);
+
+  const auto geometry = drawer.fanImageGeometry(ping);
+  ASSERT_GT(geometry.width, 0);
+  ASSERT_GT(geometry.height, 0);
+  const cv::Mat clean =
+      cv::Mat::zeros(geometry.height, geometry.width, CV_8UC3);
+  const cv::Mat annotated = drawer.drawOverlay(ping, clean);
+
+  // The zero-bearing ray runs vertically from the sonar origin. This pixel is
+  // well away from the outer range arc and all text, so a nonzero value pins
+  // the boresight itself rather than merely the existence of an overlay.
+  const cv::Vec3b boresight = annotated.at<cv::Vec3b>(
+      geometry.height / 2, geometry.origin_x);
+  EXPECT_GT(boresight[0] + boresight[1] + boresight[2], 0);
+}
+
 }  // namespace

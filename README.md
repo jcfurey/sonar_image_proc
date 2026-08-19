@@ -24,15 +24,20 @@ Subscribes to the topic `sonar_image` of type [marine_acoustic_msgs/ProjectedSon
 
 ## Publishers
 
-By default publishes three [sensor_msgs/Image](https://docs.ros.org/en/melodic/api/sensor_msgs/html/msg/Image.html) topics:
+By default publishes four [sensor_msgs/Image](https://docs.ros.org/en/melodic/api/sensor_msgs/html/msg/Image.html) topics:
 
-*  `drawn_sonar` contains an image of the sonar drawn with a cartesian projection
-with the origin (range = 0) of the sonar centered on the bottom edge of
+* `drawn_sonar` is the operator image: a Cartesian fan with range rings, meter
+labels, bearing rays, and degree labels baked into the pixels. It has the
+origin (range = 0) of the sonar centered on the bottom edge of
 the image, and azimuth=0 extending vertically upwards in the image.  By default,
 the image height is set by the number range bins, and the image width is
 automatically determined based on the height and the min/max azimuth of the
 sonar image.   The color map used to convert the sonar intensity to RGB is set
 in code.
+
+* `drawn_sonar_clean` contains the same Cartesian fan without annotations. Use
+this topic for optical flow, feature tracking, recording for machine learning,
+and other pixel-processing consumers.
 
 ![](drawn_sonar.png)
 
@@ -50,7 +55,8 @@ direction:
 
 ![](drawn_sonar_rect.png)
 
-* `drawn_sonar_osd` adds guidelines and annotations to `drawn_sonar`.  Overlay parameters can be configured in realtime.
+* `drawn_sonar_osd` is a compatibility alias of annotated `drawn_sonar` for
+existing dashboards.
 
 If the param `publish_timing` is `true`, the node will track the elapsed time to
 draw each sonar image and publish that information to the topic `sonar_image_proc_timing`

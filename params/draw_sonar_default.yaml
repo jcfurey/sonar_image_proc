@@ -38,8 +38,10 @@
     use_gpu: true
     
     # Overlay grid settings
-    range_spacing: 10.0      # Spacing between range circles (meters, 0 for auto)
+    range_spacing: 0.0       # Auto-select useful meter rings for the displayed range
     bearing_spacing: 10.0    # Spacing between bearing lines (degrees)
+    bearing_at_zero: true    # Anchor the bearing grid and label at boresight
+    font_scale: 0.8          # Range/bearing annotation size
     line_alpha: 0.5          # Opacity of overlay lines (0.0-1.0)
     line_thickness: 1        # Thickness of overlay lines (pixels)
     

@@ -36,7 +36,10 @@ class DrawSonarComponent : public rclcpp::Node {
   void setColorMap(const std::string &color_map_name);
 
   rclcpp::Subscription<marine_acoustic_msgs::msg::ProjectedSonarImage>::SharedPtr sub_sonar_image_;
+  // Operator product: Cartesian fan with baked-in range/bearing annotations.
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
+  // Machine-vision product: identical fan pixels without annotations.
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr clean_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rect_pub_;
   // Pixel<->metre mapping of the fan. Published per ping because the scale is
   // per ping once the fan follows the ping's native range resolution.
