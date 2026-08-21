@@ -75,11 +75,19 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // see lib/GpuSonarDraw.cu). CPU path is the fallback for non-uint8 pings,
     // non-LUT colormaps, or any device failure.
     this->declare_parameter("use_gpu", false);
+    // Compatibility outputs are kept on for one migration window. New
+    // consumers use fan_info and drawn_sonar_polar.
+    this->declare_parameter("publish_legacy_camera_info", true);
+    this->declare_parameter("publish_legacy_rect_topic", true);
 
     max_range_ = this->get_parameter("max_range").as_double();
     use_gpu_ = this->get_parameter("use_gpu").as_bool();
     publish_timing_ = this->get_parameter("publish_timing").as_bool();
     publish_histogram_ = this->get_parameter("publish_histogram").as_bool();
+    publish_legacy_camera_info_ =
+        this->get_parameter("publish_legacy_camera_info").as_bool();
+    publish_legacy_rect_topic_ =
+        this->get_parameter("publish_legacy_rect_topic").as_bool();
     input_image_layout_ =
         this->get_parameter("input_image_layout").as_string();
 
@@ -145,17 +153,27 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar", 10);
     clean_pub_ =
         this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_clean", 10);
-    // The pixel<->metre mapping of the fan, carried with the image instead of
-    // assumed by each consumer. The fan is an orthographic metric remap, NOT a
-    // perspective projection: fx = fy = pixels per metre, (cx, cy) is the
-    // sonar origin, D is empty and R is identity. Do not run image_proc
-    // rectification against it -- there is no lens model here to undistort.
-    // It exists because the scale is per-ping once the fan is scaled to the
-    // ping's native range resolution.
-    camera_info_pub_ =
-        this->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 10);
+    // The fan is an orthographic metric remap, not a pinhole camera. Carry its
+    // per-ping pixel geometry in a message with those actual semantics.
+    fan_info_pub_ =
+        this->create_publisher<sonar_image_proc::msg::FanImageInfo>("fan_info", 10);
+    if (publish_legacy_camera_info_) {
+      camera_info_pub_ =
+          this->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 10);
+      RCLCPP_WARN(this->get_logger(),
+                  "Publishing deprecated non-pinhole camera_info compatibility "
+                  "metadata; migrate consumers to fan_info");
+    }
     osd_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_osd", 10);
-    rect_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_rect", 10);
+    polar_pub_ =
+        this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_polar", 10);
+    if (publish_legacy_rect_topic_) {
+      rect_pub_ =
+          this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_rect", 10);
+      RCLCPP_WARN(this->get_logger(),
+                  "drawn_sonar_rect is deprecated and was never a rectified "
+                  "camera image; use drawn_sonar_polar");
+    }
 
     if (publish_timing_)
       timing_pub_ = this->create_publisher<std_msgs::msg::String>("sonar_image_proc_timing", 10);
@@ -325,14 +343,21 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       if (!gpu_drawn)
         rect_mat = sonar_drawer_.drawRectSonarImage(interface, *color_map_);
 
-      // Rotate rectangular image to the more expected format where zero range
+      // Rotate the polar range x bearing image to the more expected format
+      // where zero range
       // is at the bottom of the image, with negative azimuth to the right
-      // aka (rotated 90 degrees CCW). Subscriber-gated like the OSD: it is an
-      // inspection output, and nothing in the deployed workspace consumes it.
-      if (rect_pub_->get_subscription_count() > 0) {
+      // aka (rotated 90 degrees CCW). Subscriber-gated like the OSD: both names
+      // are inspection outputs, and nothing deployed consumes either one.
+      const bool polar_wanted = polar_pub_->get_subscription_count() > 0;
+      const bool legacy_rect_wanted =
+          rect_pub_ && rect_pub_->get_subscription_count() > 0;
+      if (polar_wanted || legacy_rect_wanted) {
         cv::Mat rotated_rect;
         cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
-        cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
+        if (polar_wanted)
+          cvBridgeAndPublish(working_msg, rotated_rect, polar_pub_);
+        if (legacy_rect_wanted)
+          cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
       }
 
       rect_elapsed = SteadyClock::now() - begin;
@@ -341,27 +366,43 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       if (!gpu_drawn)
         sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
 
-      // Same stamp and frame as the image it describes — and published BEFORE
-      // it (the CameraPublisher convention): consumers latch the latest
-      // camera_info and apply it to the image they are processing, so
-      // image-first ordering handed sonar_optical_flow the PREVIOUS ping's
-      // pixels_per_meter, which moves every ping under native scaling.
+      // Same stamp and frame as the image it describes. Consumers synchronize
+      // fan_info and drawn_sonar_clean exactly by stamp; publishing first also
+      // keeps compatibility with the legacy latch-based CameraInfo consumer.
       {
         const auto geom = sonar_drawer_.fanImageGeometry(interface);
-        sensor_msgs::msg::CameraInfo info;
-        info.header = working_msg->header;
-        info.width = geom.width;
-        info.height = geom.height;
-        info.distortion_model = "";
-        info.d.clear();
-        info.k = {geom.pixels_per_meter, 0.0, static_cast<double>(geom.origin_x),
-                  0.0, geom.pixels_per_meter, static_cast<double>(geom.height),
-                  0.0, 0.0, 1.0};
-        info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-        info.p = {geom.pixels_per_meter, 0.0, static_cast<double>(geom.origin_x),
-                  0.0, 0.0, geom.pixels_per_meter,
-                  static_cast<double>(geom.height), 0.0, 0.0, 0.0, 1.0, 0.0};
-        camera_info_pub_->publish(info);
+        const auto azimuth = interface.azimuthBounds();
+        sonar_image_proc::msg::FanImageInfo fan_info;
+        fan_info.header = working_msg->header;
+        fan_info.width = geom.width;
+        fan_info.height = geom.height;
+        fan_info.origin_u = geom.origin_x;
+        fan_info.origin_v = geom.height;
+        fan_info.pixels_per_meter = geom.pixels_per_meter;
+        fan_info.min_range = interface.minRange();
+        fan_info.max_range = sonar_drawer_.effectiveMaxRange(interface);
+        fan_info.min_bearing = azimuth.first;
+        fan_info.max_bearing = azimuth.second;
+        fan_info_pub_->publish(fan_info);
+
+        if (camera_info_pub_) {
+          sensor_msgs::msg::CameraInfo info;
+          info.header = working_msg->header;
+          info.width = geom.width;
+          info.height = geom.height;
+          info.distortion_model = "";
+          info.d.clear();
+          info.k = {geom.pixels_per_meter, 0.0,
+                    static_cast<double>(geom.origin_x), 0.0,
+                    geom.pixels_per_meter, static_cast<double>(geom.height),
+                    0.0, 0.0, 1.0};
+          info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+          info.p = {geom.pixels_per_meter, 0.0,
+                    static_cast<double>(geom.origin_x), 0.0, 0.0,
+                    geom.pixels_per_meter, static_cast<double>(geom.height),
+                    0.0, 0.0, 0.0, 1.0, 0.0};
+          camera_info_pub_->publish(info);
+        }
       }
       if (clean_pub_->get_subscription_count() > 0)
         cvBridgeAndPublish(working_msg, sonar_mat, clean_pub_);

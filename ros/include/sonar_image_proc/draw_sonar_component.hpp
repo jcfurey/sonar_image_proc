@@ -11,6 +11,7 @@
 #include "marine_acoustic_msgs/msg/projected_sonar_image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "sonar_image_proc/msg/fan_image_info.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/u_int32_multi_array.hpp"
 
@@ -40,9 +41,14 @@ class DrawSonarComponent : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
   // Machine-vision product: identical fan pixels without annotations.
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr clean_pub_;
+  // Polar range x bearing inspection image. This used to be called "rect",
+  // although no camera-style rectification is involved.
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr polar_pub_;
+  // Temporary compatibility alias for drawn_sonar_polar.
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rect_pub_;
-  // Pixel<->metre mapping of the fan. Published per ping because the scale is
-  // per ping once the fan follows the ping's native range resolution.
+  // Orthographic pixel<->metre mapping of the Cartesian fan.
+  rclcpp::Publisher<sonar_image_proc::msg::FanImageInfo>::SharedPtr fan_info_pub_;
+  // Temporary non-pinhole CameraInfo compatibility contract.
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr osd_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr timing_pub_;
@@ -52,6 +58,8 @@ class DrawSonarComponent : public rclcpp::Node {
 
   float max_range_;
   bool publish_timing_, publish_histogram_;
+  bool publish_legacy_camera_info_{true};
+  bool publish_legacy_rect_topic_{true};
 
   float min_db_, max_db_;
   bool log_scale_;

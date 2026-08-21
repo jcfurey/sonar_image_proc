@@ -92,14 +92,14 @@ This creates two processing pipelines:
 1. **Raw sonar pipeline** (namespace: `/oculus`)
    - `draw_sonar`: Visualizes raw sonar images
    - Input: `/oculus/sonar_image`
-   - Outputs: `/oculus/drawn_sonar`, `/oculus/drawn_sonar_clean`, `/oculus/drawn_sonar_osd`, `/oculus/drawn_sonar_rect`
+   - Outputs: `/oculus/drawn_sonar`, `/oculus/drawn_sonar_clean`, `/oculus/drawn_sonar_osd`, `/oculus/drawn_sonar_polar`, `/oculus/fan_info`
 
 2. **Postprocessed pipeline** (namespace: `/postprocess`)
    - `sonar_postprocessor`: Applies gain/gamma corrections
    - `draw_sonar`: Visualizes post-processed sonar images
    - Input: `/oculus/sonar_image`
    - Intermediate: `/postprocess/sonar_image`
-   - Outputs: `/postprocess/drawn_sonar`, `/postprocess/drawn_sonar_clean`, `/postprocess/drawn_sonar_osd`, `/postprocess/drawn_sonar_rect`
+   - Outputs: `/postprocess/drawn_sonar`, `/postprocess/drawn_sonar_clean`, `/postprocess/drawn_sonar_osd`, `/postprocess/drawn_sonar_polar`, `/postprocess/fan_info`
 
 **Example:**
 ```bash
@@ -115,7 +115,9 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 - `drawn_sonar` (sensor_msgs/Image): Annotated operator fan with range and bearing labels
 - `drawn_sonar_clean` (sensor_msgs/Image): Annotation-free fan for machine vision
 - `drawn_sonar_osd` (sensor_msgs/Image): Compatibility alias of `drawn_sonar`
-- `drawn_sonar_rect` (sensor_msgs/Image): Rectified sonar image
+- `drawn_sonar_polar` (sensor_msgs/Image): Rotated range×bearing inspection image; not camera-rectified
+- `fan_info` (sonar_image_proc/FanImageInfo): Per-ping orthographic fan geometry
+- `drawn_sonar_rect` / `camera_info`: Deprecated migration aliases
 - `sonar_image_proc_timing` (std_msgs/String): Processing timing information
 - `histogram` (std_msgs/UInt32MultiArray): Histogram data (if enabled)
 
@@ -131,6 +133,8 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 - `max_range`: Maximum range to display (0.0 = auto)
 - `publish_histogram`: Enable histogram publishing
 - `publish_timing`: Enable timing info publishing
+- `publish_legacy_camera_info`: Publish deprecated non-pinhole `camera_info`
+- `publish_legacy_rect_topic`: Alias `drawn_sonar_polar` as `drawn_sonar_rect`
 - `range_spacing`: Spacing between range circles (meters)
 - `bearing_spacing`: Spacing between bearing lines (degrees)
 - `line_alpha`: Opacity of overlay lines (0.0-1.0)
