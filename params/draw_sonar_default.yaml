@@ -48,3 +48,7 @@
     # Publishing options
     publish_histogram: false  # Publish histogram data
     publish_timing: true      # Publish timing information
+    # One-release migration aliases. New consumers use fan_info and
+    # drawn_sonar_polar; disable these after old bags/dashboards are retired.
+    publish_legacy_camera_info: true
+    publish_legacy_rect_topic: true

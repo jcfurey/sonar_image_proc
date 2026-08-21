@@ -59,6 +59,16 @@ endif()
 find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
+# A Cartesian sonar fan is an orthographic metric remap, so CameraInfo cannot
+# describe it without pretending it is a pinhole camera.  Generate a dedicated
+# stamped geometry message instead.  This package predates the usual split
+# between interface and implementation packages; keeping the one small message
+# here avoids introducing a new repository solely for the migration.
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/FanImageInfo.msg"
+  DEPENDENCIES std_msgs
+)
+
 # ament_auto_depend_on_packages is the non-deprecated API in newer ament
 # releases, but it is not provided by ROS 2 Jazzy. Keep the package buildable
 # on both versions while Jazzy remains in use.
@@ -95,9 +105,14 @@ set(sonar_image_proc_SRCS
 )
 
 # Core library containing core functionality
-add_library(sonar_image_proc SHARED ${sonar_image_proc_SRCS})
-target_link_libraries(sonar_image_proc ${OpenCV_LIBS})
-sonar_target_dependencies(sonar_image_proc
+add_library(sonar_image_proc_core SHARED ${sonar_image_proc_SRCS})
+# Preserve the historical installed library name while avoiding collision with
+# the rosidl custom target named after the package.
+set_target_properties(sonar_image_proc_core PROPERTIES
+  OUTPUT_NAME sonar_image_proc
+)
+target_link_libraries(sonar_image_proc_core ${OpenCV_LIBS})
+sonar_target_dependencies(sonar_image_proc_core
   rclcpp
   sensor_msgs
   marine_acoustic_msgs
@@ -105,10 +120,10 @@ sonar_target_dependencies(sonar_image_proc
 )
 
 if(CMAKE_CUDA_COMPILER)
-  target_sources(sonar_image_proc PRIVATE lib/GpuSonarDraw.cu)
+  target_sources(sonar_image_proc_core PRIVATE lib/GpuSonarDraw.cu)
   # PUBLIC: the components library keys its GPU dispatch off this define
-  target_compile_definitions(sonar_image_proc PUBLIC SONAR_IMAGE_PROC_WITH_CUDA)
-  target_link_libraries(sonar_image_proc CUDA::cudart_static)
+  target_compile_definitions(sonar_image_proc_core PUBLIC SONAR_IMAGE_PROC_WITH_CUDA)
+  target_link_libraries(sonar_image_proc_core CUDA::cudart_static)
 endif()
 
 # Component library containing ROS 2 components (formerly nodelets)
@@ -116,7 +131,12 @@ add_library(sonar_image_proc_components SHARED
   ros/src/draw_sonar_component.cpp
   ros/src/sonar_postprocessor_component.cpp
 )
-target_link_libraries(sonar_image_proc_components sonar_image_proc)
+target_link_libraries(sonar_image_proc_components sonar_image_proc_core)
+# The component publishes this package's generated FanImageInfo message.
+rosidl_get_typesupport_target(sonar_image_proc_typesupport
+  ${PROJECT_NAME} rosidl_typesupport_cpp)
+target_link_libraries(sonar_image_proc_components
+  "${sonar_image_proc_typesupport}")
 sonar_target_dependencies(sonar_image_proc_components
   rclcpp
   rclcpp_components
@@ -147,7 +167,7 @@ sonar_target_dependencies(sonar_postprocessor_node
 # bag2sonar tool for offline processing
 add_executable(bag2sonar ros/tools/bag2sonar.cpp)
 target_link_libraries(bag2sonar
-  sonar_image_proc
+  sonar_image_proc_core
   Boost::program_options
 )
 target_include_directories(bag2sonar PRIVATE
@@ -165,7 +185,7 @@ sonar_target_dependencies(bag2sonar
 
 # Install targets
 install(TARGETS
-  sonar_image_proc
+  sonar_image_proc_core
   sonar_image_proc_components
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -188,10 +208,14 @@ install(DIRECTORY params/
   FILES_MATCHING PATTERN "*.yaml"
 )
 
-# Install the Python module into the active interpreter's platform-independent
-# package directory instead of a hard-coded Python-version path.
-ament_python_install_package(${PROJECT_NAME}
-  PACKAGE_DIR python/${PROJECT_NAME}
+# rosidl_generator_py owns the installed sonar_image_proc Python package now
+# that this package defines FanImageInfo. Installing that same package again
+# with ament_python_install_package creates duplicate custom-target names on
+# ROS 2 Jazzy. Add the hand-written helper to the generated package directly;
+# its generated __init__.py and message subpackage remain owned by ROSIDL.
+install(FILES
+  python/${PROJECT_NAME}/sonar_msg_metadata.py
+  DESTINATION "${PYTHON_INSTALL_DIR}/${PROJECT_NAME}"
 )
 
 # sonar_fov.py is ROS 1 (rospy, header.seq, positional Point) and fails on
@@ -208,14 +232,26 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_draw_sonar test/unit/test_draw_sonar.cpp)
-  target_link_libraries(test_draw_sonar sonar_image_proc)
+  target_link_libraries(test_draw_sonar sonar_image_proc_core)
 
   # The ROS message interface lives under ros/include and needs the message
   # package; the core library target does not carry either.
   ament_add_gtest(test_msg_interface test/unit/test_msg_interface.cpp)
   target_include_directories(test_msg_interface PRIVATE ros/include)
-  target_link_libraries(test_msg_interface sonar_image_proc)
+  target_link_libraries(test_msg_interface sonar_image_proc_core)
   sonar_target_dependencies(test_msg_interface marine_acoustic_msgs geometry_msgs)
+
+  ament_add_gtest(test_fan_info_contract
+    test/unit/test_fan_info_contract.cpp
+  )
+  target_include_directories(test_fan_info_contract PRIVATE ros/include)
+  target_link_libraries(test_fan_info_contract sonar_image_proc_components)
+  sonar_target_dependencies(test_fan_info_contract
+    rclcpp
+    sensor_msgs
+    marine_acoustic_msgs
+    geometry_msgs
+  )
 endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

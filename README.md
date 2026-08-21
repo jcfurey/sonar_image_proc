@@ -24,7 +24,8 @@ Subscribes to the topic `sonar_image` of type [marine_acoustic_msgs/ProjectedSon
 
 ## Publishers
 
-By default publishes four [sensor_msgs/Image](https://docs.ros.org/en/melodic/api/sensor_msgs/html/msg/Image.html) topics:
+By default publishes Cartesian fan images, a polar inspection image, and
+stamped fan geometry:
 
 * `drawn_sonar` is the operator image: a Cartesian fan with range rings, meter
 labels, bearing rays, and degree labels baked into the pixels. It has the
@@ -41,10 +42,9 @@ and other pixel-processing consumers.
 
 ![](drawn_sonar.png)
 
-* `drawn_sonar_rect` is the contents of the SonarImage data mapped directly from polar to cartesian coordinates.
-Since the intensity data in the SonarImage is stored azimuth-major, the data is
-mapped into the image space with range in the X direction and azimuth in the Y
-direction:
+* `drawn_sonar_polar` is the source intensity raster in range×bearing space,
+rotated for display so zero range is at the bottom. It is not a rectified camera
+image. Since the source data is azimuth-major, before the display rotation:
 
  * Image width is the number of range bins in the data, with the minimum range
    on the left side and maximum range on the right side.
@@ -54,6 +54,17 @@ direction:
    bottom.
 
 ![](drawn_sonar_rect.png)
+
+* `fan_info` (`sonar_image_proc/FanImageInfo`) carries the exact per-ping
+orthographic geometry of `drawn_sonar` and `drawn_sonar_clean`: dimensions,
+fan apex, pixels per metre, range limits, and bearing limits. Consumers should
+pair it with the image by header stamp.
+
+* `drawn_sonar_rect` and `camera_info` are deprecated compatibility outputs.
+The former aliases `drawn_sonar_polar`; the latter historically stored fan
+scale in pinhole-camera fields even though an orthographic fan is not a camera
+model. Disable them with `publish_legacy_rect_topic` and
+`publish_legacy_camera_info` after all consumers migrate.
 
 * `drawn_sonar_osd` is a compatibility alias of annotated `drawn_sonar` for
 existing dashboards.
@@ -72,6 +83,9 @@ JSON [string](http://docs.ros.org/en/noetic/api/std_msgs/html/msg/String.html)
 to the topic `sonar_image_proc_timing`.  Defaults to `true`
 
 If `publish_histogram` is `true` the node will publish a "raw" histogram information as a `UInt32MultiArray` to the topic `histogram`.   It contains a vector of unsigned ints giving the count for each intensity value -- so for 8 bit data the vector will be 256 elements in length, and for 16-bit data it will be 65536 elements in length.
+
+Do not run ROS `image_proc` rectification on any sonar fan output. The Cartesian
+fan is an orthographic remap with no lens distortion model.
 
 # bag2sonar
 

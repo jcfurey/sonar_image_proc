@@ -69,7 +69,9 @@ After launching, you'll get:
 - `/oculus/drawn_sonar` - Annotated operator image with range/bearing labels
 - `/oculus/drawn_sonar_clean` - Annotation-free machine-vision image
 - `/oculus/drawn_sonar_osd` - Compatibility alias of `drawn_sonar`
-- `/oculus/drawn_sonar_rect` - Rectified view
+- `/oculus/drawn_sonar_polar` - Rotated range×bearing inspection view
+- `/oculus/fan_info` - Stamped orthographic geometry for the Cartesian fan
+- `/oculus/drawn_sonar_rect` - Deprecated alias of `drawn_sonar_polar`
 
 View with:
 ```bash
