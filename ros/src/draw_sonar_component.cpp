@@ -2,16 +2,17 @@
 // Author: Aaron Marburg
 // Ported to ROS 2 by GitHub Copilot
 
-#include <cmath>
 #include "sonar_image_proc/draw_sonar_component.hpp"
 
 #include <chrono>
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
+#include <cmath>
+#include <cstdint>
 #include <sstream>
 
 #include <cv_bridge/cv_bridge.hpp>
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/ColorMaps.h"
 #include "sonar_image_proc/DrawSonar.h"
@@ -26,9 +27,6 @@
 // Subscribes to sonar message topic, draws using opencv then publishes result
 
 namespace draw_sonar {
-
-using namespace std;
-using namespace cv;
 
 using sonar_image_proc::SonarImageMsgInterface;
 using std_msgs::msg::UInt32MultiArray;
@@ -67,6 +65,20 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // Upper bound on the native scale. 0 = unbounded, which is safe because
     // the native output height is exactly nRanges.
     this->declare_parameter("max_pixels_per_meter", 0.0);
+    // Rectangular range-bearing output. A zero height retains the ping's
+    // native radial sample density; a zero width derives a 16:9 (configurable)
+    // rectilinear raster from that height. Positive dimensions pin the output.
+    this->declare_parameter("rectified_width", 0);
+    this->declare_parameter("rectified_height", 0);
+    this->declare_parameter("rectified_aspect_ratio", 16.0 / 9.0);
+    // True virtual-camera projection onto the stamped floor plane. Empty
+    // optical frame derives sonar*/optical_frame from the ping's
+    // sonar*/projection_frame; operational profiles pin it explicitly.
+    this->declare_parameter("floor_projection_sensor_frame", "");
+    this->declare_parameter("floor_projection_optical_frame", "");
+    this->declare_parameter("floor_projection_surface_frame",
+                            "sea_floor_estimate");
+    this->declare_parameter("floor_projection_tf_timeout", 0.05);
     // marine_acoustic_msgs is beam-major. The rendering library retains its
     // range-major working image; older recorded images can opt into the
     // compatibility layout through bringup.
@@ -76,7 +88,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     // non-LUT colormaps, or any device failure.
     this->declare_parameter("use_gpu", false);
     // Compatibility outputs are kept on for one migration window. New
-    // consumers use fan_info and drawn_sonar_polar.
+    // consumers use fan_info, rectified_info, and drawn_sonar_polar according
+    // to the image geometry they actually consume.
     this->declare_parameter("publish_legacy_camera_info", true);
     this->declare_parameter("publish_legacy_rect_topic", true);
 
@@ -88,8 +101,47 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         this->get_parameter("publish_legacy_camera_info").as_bool();
     publish_legacy_rect_topic_ =
         this->get_parameter("publish_legacy_rect_topic").as_bool();
+    const int64_t configured_rectified_width =
+        this->get_parameter("rectified_width").as_int();
+    const int64_t configured_rectified_height =
+        this->get_parameter("rectified_height").as_int();
+    const double configured_rectified_aspect_ratio =
+        this->get_parameter("rectified_aspect_ratio").as_double();
+    floor_projection_sensor_frame_ =
+        this->get_parameter("floor_projection_sensor_frame").as_string();
+    floor_projection_optical_frame_ =
+        this->get_parameter("floor_projection_optical_frame").as_string();
+    floor_projection_surface_frame_ =
+        this->get_parameter("floor_projection_surface_frame").as_string();
+    floor_projection_tf_timeout_ =
+        this->get_parameter("floor_projection_tf_timeout").as_double();
     input_image_layout_ =
         this->get_parameter("input_image_layout").as_string();
+
+    constexpr int kMaxRectifiedDimension = 16384;
+    if (configured_rectified_width < 0 || configured_rectified_height < 0 ||
+        configured_rectified_width == 1 || configured_rectified_height == 1 ||
+        configured_rectified_width > kMaxRectifiedDimension ||
+        configured_rectified_height > kMaxRectifiedDimension ||
+        !std::isfinite(configured_rectified_aspect_ratio) ||
+        configured_rectified_aspect_ratio <= 0.0 ||
+        configured_rectified_aspect_ratio > 10.0) {
+      throw std::invalid_argument(
+          "rectified_width/height must be 0 or 2..16384 and "
+          "rectified_aspect_ratio must be finite in (0, 10]");
+    }
+    if (floor_projection_surface_frame_.empty() ||
+        !std::isfinite(floor_projection_tf_timeout_) ||
+        floor_projection_tf_timeout_ < 0.0 ||
+        floor_projection_tf_timeout_ > 1.0) {
+      throw std::invalid_argument(
+          "floor_projection_surface_frame must be nonempty and "
+          "floor_projection_tf_timeout must be finite in [0, 1]");
+    }
+    rectified_width_ = static_cast<int>(configured_rectified_width);
+    rectified_height_ = static_cast<int>(configured_rectified_height);
+    rectified_aspect_ratio_ =
+        static_cast<float>(configured_rectified_aspect_ratio);
 
     // Read the log-scale window BEFORE setColorMap: the GPU LUT folds the log
     // transform into its own index, so it has to be built with these known.
@@ -107,6 +159,9 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     sonar_drawer_.setPixelsPerMeter(pixels_per_meter);
     sonar_drawer_.setMaxPixelsPerMeter(max_pixels_per_meter);
     sonar_drawer_.setMaxRange(max_range_);
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ =
+        std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
     if (pixels_per_meter > 0.0f) {
       RCLCPP_INFO(this->get_logger(), "Using fixed pixels_per_meter: %f",
                   pixels_per_meter);
@@ -167,6 +222,16 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     osd_pub_ = this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_osd", 10);
     polar_pub_ =
         this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_polar", 10);
+    rectified_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+        "drawn_sonar_rectified", 10);
+    rectified_info_pub_ =
+        this->create_publisher<sonar_image_proc::msg::RectifiedImageInfo>(
+            "rectified_info", 10);
+    floor_projected_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+        "drawn_sonar_floor_projected", 10);
+    floor_projected_info_pub_ =
+        this->create_publisher<sensor_msgs::msg::CameraInfo>(
+            "floor_projected_camera_info", 10);
     if (publish_legacy_rect_topic_) {
       rect_pub_ =
           this->create_publisher<sensor_msgs::msg::Image>("drawn_sonar_rect", 10);
@@ -291,6 +356,8 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     }
 
     Seconds rect_elapsed = Seconds::zero();
+    Seconds rectified_elapsed = Seconds::zero();
+    Seconds floor_projected_elapsed = Seconds::zero();
     Seconds map_elapsed = Seconds::zero();
     Seconds histogram_elapsed = Seconds::zero();
 
@@ -363,6 +430,16 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       rect_elapsed = SteadyClock::now() - begin;
       begin = SteadyClock::now();
 
+      publishRectifiedProducts(working_msg, interface, rect_mat);
+
+      rectified_elapsed = SteadyClock::now() - begin;
+      begin = SteadyClock::now();
+
+      publishFloorProjectedProducts(working_msg, interface, rect_mat);
+
+      floor_projected_elapsed = SteadyClock::now() - begin;
+      begin = SteadyClock::now();
+
       if (!gpu_drawn)
         sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
 
@@ -420,11 +497,17 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     }
 
     if (publish_timing_) {
-      ostringstream output;
+      std::ostringstream output;
 
       output << "{";
-      output << "\"draw_total\" : " << (map_elapsed + rect_elapsed).count();
+      output << "\"draw_total\" : "
+             << (map_elapsed + rect_elapsed + rectified_elapsed +
+                 floor_projected_elapsed)
+                    .count();
       output << ", \"rect\" : " << rect_elapsed.count();
+      output << ", \"rectified\" : " << rectified_elapsed.count();
+      output << ", \"floor_projected\" : "
+             << floor_projected_elapsed.count();
       output << ", \"map\" : " << map_elapsed.count();
 
       if (publish_histogram_)
@@ -489,15 +572,15 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     if (color_map_name == "mitchell") {
       for (int i = 0; i < 256; ++i) {
         const float f = log_fraction(i);
-        lut_[3 * i + 0] = static_cast<uchar>((1.0f - f) * 255.0f);
-        lut_[3 * i + 1] = static_cast<uchar>(f * 255.0f);
-        lut_[3 * i + 2] = static_cast<uchar>(f * 255.0f);
+        lut_[3 * i + 0] = static_cast<uint8_t>((1.0f - f) * 255.0f);
+        lut_[3 * i + 1] = static_cast<uint8_t>(f * 255.0f);
+        lut_[3 * i + 2] = static_cast<uint8_t>(f * 255.0f);
       }
       lut_valid_ = true;
     } else {  // inferno / inferno_saturation
       for (int i = 0; i < 256; ++i)
         for (int c = 0; c < 3; ++c)
-          lut_[3 * i + c] = cv::saturate_cast<uchar>(
+          lut_[3 * i + c] = cv::saturate_cast<uint8_t>(
               InfernoColorMap::_inferno_data_uint8[log_index(i)][c]);
       if (color_map_name == "inferno_saturation") {
         // The CPU keys the green marker off the POST-log intensity

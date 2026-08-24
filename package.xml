@@ -24,6 +24,8 @@
   <!-- used directly by test_msg_interface; previously resolved only through
        marine_acoustic_msgs' transitive find_package -->
   <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
   <depend>cv_bridge</depend>
   <depend>image_transport</depend>
   <depend>sensor_msgs</depend>

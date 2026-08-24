@@ -8,10 +8,12 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <memory>
-#include <opencv2/core/core.hpp>
 #include <utility>
 #include <vector>
+
+#include <opencv2/core/core.hpp>
 
 #include "sonar_image_proc/AbstractSonarInterface.h"
 #include "sonar_image_proc/ColorMaps.h"
@@ -133,6 +135,105 @@ class SonarDrawer {
   };
   FanGeometry fanImageGeometry(const AbstractSonarInterface &ping) const;
 
+  // Geometry of the loss-minimized rectangular range-bearing product.
+  //
+  // Horizontal pixels use a rectilinear (pinhole-style) angular axis:
+  //
+  //   u = horizontal_focal_length * tan(bearing) + principal_point_u
+  //
+  // Vertical pixels retain the sonar's measured range rather than inventing
+  // an elevation that the sensor cannot observe:
+  //
+  //   range = max_range - v * meters_per_row
+  //
+  // This makes the image look and behave like a conventional forward-facing
+  // rectangular raster while preserving every range bin. It is deliberately
+  // not sensor_msgs/CameraInfo geometry: a camera's v coordinate is elevation,
+  // whereas this image's v coordinate is range.
+  struct RectifiedGeometry {
+    int width = 0;
+    int height = 0;
+    float horizontal_focal_length = 0.0f;
+    float principal_point_u = 0.0f;
+    float meters_per_row = 0.0f;
+    float min_range = 0.0f;
+    float max_range = 0.0f;
+    float min_bearing = 0.0f;
+    float max_bearing = 0.0f;
+
+    bool valid() const {
+      return width >= 2 && height >= 2 &&
+             horizontal_focal_length > 0.0f && meters_per_row > 0.0f;
+    }
+  };
+
+  // A zero output dimension selects an automatic value. The automatic height
+  // retains the native radial sample density (and follows maxRange()); the
+  // automatic width is height * aspectRatio. The default is therefore a 16:9
+  // operator/CV image with native radial sampling and a derived angular width.
+  RectifiedGeometry rectifiedImageGeometry(
+      const AbstractSonarInterface &ping, int outputWidth = 0,
+      int outputHeight = 0, float aspectRatio = 16.0f / 9.0f) const;
+
+  // Resample the unrotated range-bearing raster returned by
+  // drawRectSonarImage() into RectifiedGeometry. This goes directly from the
+  // source ping raster; it must not be fed the Cartesian fan, which would add
+  // a lossy inverse remap.
+  cv::Mat rectifyRangeBearingImage(
+      const AbstractSonarInterface &ping, const cv::Mat &rangeBearingImage,
+      const RectifiedGeometry &geometry);
+
+  // A genuine pinhole raster used for surface-aware projection. Unlike
+  // RectifiedGeometry, both image coordinates are angular camera coordinates:
+  //
+  //   u = fx * camera_x / camera_z + cx
+  //   v = fy * camera_y / camera_z + cy
+  struct PinholeGeometry {
+    int width = 0;
+    int height = 0;
+    float fx = 0.0f;
+    float fy = 0.0f;
+    float cx = 0.0f;
+    float cy = 0.0f;
+
+    bool valid() const {
+      return width >= 2 && height >= 2 && std::isfinite(fx) &&
+             std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) &&
+             fx > 0.0f && fy > 0.0f;
+    }
+  };
+
+  // sensor_from_camera: point_sensor = rotation * point_camera + translation.
+  // Keeping this ROS-independent makes the projection geometry testable
+  // without a TF graph.
+  struct RigidTransform {
+    cv::Matx33f rotation = cv::Matx33f::eye();
+    cv::Vec3f translation{0.0f, 0.0f, 0.0f};
+  };
+
+  // Plane equation in the sonar projection frame:
+  //
+  //   normal.dot(point) + offset = 0
+  struct Plane {
+    cv::Vec3f normal{0.0f, 0.0f, 0.0f};
+    float offset = 0.0f;
+  };
+
+  // Inverse-project every destination camera ray onto a measured/assumed
+  // surface plane, then sample the source ping at the resulting physical
+  // range and bearing. The candidate point is accepted only when its inferred
+  // elevation lies inside that beam's transmitted vertical aperture.
+  //
+  // This is a real perspective projection and removes the circular bow caused
+  // by using slant range as an image row. Its semantics are explicitly tied to
+  // the supplied plane: callers must not present it as scene-wide elevation
+  // truth when returns may stand above or below that surface.
+  cv::Mat projectOntoPlaneImage(
+      const AbstractSonarInterface &ping,
+      const cv::Mat &rangeBearingImage, const PinholeGeometry &camera,
+      const RigidTransform &sensorFromCamera, const Plane &planeInSensor,
+      const std::vector<float> &elevationBeamwidths) const;
+
   // Limit the Cartesian fan to this range in meters. A non-positive value
   // uses the full range reported by the ping. The rectangular source image is
   // intentionally unaffected.
@@ -149,7 +250,7 @@ class SonarDrawer {
                     bool addOverlay = false);
 
   // Maps the sonar ping to an RGB image.
-  // rectImage is reshaped to be numRanges rows x numBearings columns
+  // rectImage is reshaped to be numBearings rows x numRanges columns.
   //
   // If rectImage is either 8UC3 or 32FC3, it retains that type, otherwise
   // rectImage is converted to 8UC3
@@ -157,10 +258,10 @@ class SonarDrawer {
   // Cell (0,0) is the color mapping of the data with the smallest range and
   // smallest (typically, most negative) bearing in the ping.
   //
-  // Cell (nRange,0) is the data at the max range, most negative bearing
+  // Cell (0,nRange-1) is the data at the max range, most negative bearing.
   //
-  // Cell (nRange,nBearing) is the data at the max range, most positive
-  // bearing
+  // Cell (nBearing-1,nRange-1) is the data at the max range, most positive
+  // bearing.
   //
   cv::Mat drawRectSonarImage(const AbstractSonarInterface &ping,
                              const SonarColorMap &colorMap = InfernoColorMap(),
@@ -243,6 +344,32 @@ class SonarDrawer {
     // geometries in rotation, every ping after the first in each mode hits.
     size_t _nextEvict;
   } _map;
+
+  struct CachedRectifiedMap {
+   public:
+    CachedRectifiedMap() : _nextEvict(0) { ; }
+    typedef std::pair<cv::Mat, cv::Mat> MapPair;
+
+    MapPair operator()(const AbstractSonarInterface &ping,
+                       const RectifiedGeometry &geometry);
+
+   private:
+    struct Entry {
+      bool isValidFor(const AbstractSonarInterface &ping,
+                      const RectifiedGeometry &geometry) const;
+      void create(const AbstractSonarInterface &ping,
+                  const RectifiedGeometry &geometry);
+
+      cv::Mat _map1, _map2;
+      RectifiedGeometry _geometry;
+      std::vector<float> _ranges;
+      std::vector<float> _azimuths;
+    };
+
+    static const size_t kNumEntries = 2;
+    std::array<Entry, kNumEntries> _entries;
+    size_t _nextEvict;
+  } _rectified_map;
 
   struct CachedOverlay : public Cached {
    public:
