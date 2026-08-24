@@ -66,6 +66,7 @@ ament_auto_find_build_dependencies()
 # here avoids introducing a new repository solely for the migration.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FanImageInfo.msg"
+  "msg/RectifiedImageInfo.msg"
   DEPENDENCIES std_msgs
 )
 
@@ -129,6 +130,7 @@ endif()
 # Component library containing ROS 2 components (formerly nodelets)
 add_library(sonar_image_proc_components SHARED
   ros/src/draw_sonar_component.cpp
+  ros/src/draw_sonar_rectification.cpp
   ros/src/sonar_postprocessor_component.cpp
 )
 target_link_libraries(sonar_image_proc_components sonar_image_proc_core)
@@ -142,9 +144,12 @@ sonar_target_dependencies(sonar_image_proc_components
   rclcpp_components
   sensor_msgs
   std_msgs
+  geometry_msgs
   marine_acoustic_msgs
   cv_bridge
   image_transport
+  tf2
+  tf2_ros
 )
 
 # Register components
@@ -251,6 +256,8 @@ if(BUILD_TESTING)
     sensor_msgs
     marine_acoustic_msgs
     geometry_msgs
+    tf2
+    tf2_ros
   )
 endif()
 

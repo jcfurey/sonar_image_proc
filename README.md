@@ -24,8 +24,8 @@ Subscribes to the topic `sonar_image` of type [marine_acoustic_msgs/ProjectedSon
 
 ## Publishers
 
-By default publishes Cartesian fan images, a polar inspection image, and
-stamped fan geometry:
+By default publishes Cartesian fan images, a polar inspection image, a
+forward-facing range-bearing rectangle, and stamped geometry:
 
 * `drawn_sonar` is the operator image: a Cartesian fan with range rings, meter
 labels, bearing rays, and degree labels baked into the pixels. It has the
@@ -54,6 +54,49 @@ image. Since the source data is azimuth-major, before the display rotation:
    bottom.
 
 ![](drawn_sonar_rect.png)
+
+* `drawn_sonar_rectified` is the forward-facing rectangular range×bearing
+product. It is generated directly from the source raster, before
+the Cartesian fan remap, so it never tries to invert an already-resampled fan.
+Far range is at the top, near range at the bottom, and horizontal pixels use a
+rectilinear `u = fx * tan(bearing) + cx` projection. By default it retains the
+native number of range rows and derives a 16:9 width; fixed dimensions and the
+aspect ratio are configurable. `rectified_info`
+(`sonar_image_proc/RectifiedImageInfo`) carries the exact inverse mapping from
+pixels to range and bearing.
+
+  This is camera-*style* orientation, not an optical camera model: the vertical
+  coordinate is measured range because a 2D imaging sonar does not measure
+  elevation. Consequently it must not be advertised as `CameraInfo` or overlaid
+  pixel-for-pixel on a camera frame without a separate 3D/elevation policy.
+
+* `drawn_sonar_floor_projected` supplies that elevation policy for a measured
+surface. It is an ideal virtual pinhole image in the configured sonar optical
+frame; `floor_projection_sensor_frame` identifies the sonar projection frame
+in which the ping's range/bearing convention is expressed. For every output
+pixel, the node intersects its camera ray with
+`sea_floor_estimate` at the ping timestamp, checks that the inferred elevation
+is inside the ping's transmitted vertical aperture, and samples the original
+processed raster at the resulting physical range and bearing. This removes the
+slant-range bowing that remains in `drawn_sonar_rectified`; live TF/head pitch
+naturally moves the floor above or below the optical horizon. Pixels whose rays
+cannot meet the measured plane through the sonar aperture remain black.
+
+  The horizontal intrinsics span the reported bearing limits and the vertical
+intrinsics enclose the ping's measured transmit/elevation aperture at every
+bearing. Since an Oculus fan is a wide spherical wedge rather than a rectangular
+camera pyramid, its aperture boundary is curved in a pinhole image and some
+pixels outside that footprint remain black. `fx` and `fy` are normally
+different in the 16:9 raster. Treating them as equal would invent a roughly
+100-degree vertical FOV for a 20-degree head and squeeze the usable surface into
+a thin strip.
+
+  `floor_projected_camera_info` is valid `sensor_msgs/CameraInfo` for this
+ideal virtual camera. The topic name is deliberately surface-specific: the
+projection assumes the return lies on the supplied floor plane and must not be
+treated as recovered obstacle relief. An image-derived or multi-view elevation
+estimator can supply a more general surface model later without changing the
+pinhole projection itself.
 
 * `fan_info` (`sonar_image_proc/FanImageInfo`) carries the exact per-ping
 orthographic geometry of `drawn_sonar` and `drawn_sonar_clean`: dimensions,
@@ -84,8 +127,10 @@ to the topic `sonar_image_proc_timing`.  Defaults to `true`
 
 If `publish_histogram` is `true` the node will publish a "raw" histogram information as a `UInt32MultiArray` to the topic `histogram`.   It contains a vector of unsigned ints giving the count for each intensity value -- so for 8 bit data the vector will be 256 elements in length, and for 16-bit data it will be 65536 elements in length.
 
-Do not run ROS `image_proc` rectification on any sonar fan output. The Cartesian
-fan is an orthographic remap with no lens distortion model.
+Do not run ROS `image_proc` rectification on these sonar outputs. The Cartesian
+fan is orthographic, `drawn_sonar_rectified` has bearing/range axes, and
+`drawn_sonar_floor_projected` is already an ideal pinhole view with no lens
+distortion.
 
 # bag2sonar
 

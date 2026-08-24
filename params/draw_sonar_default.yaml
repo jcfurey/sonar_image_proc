@@ -28,6 +28,28 @@
     pixels_per_meter: 0.0
     max_pixels_per_meter: 0.0
 
+    # Forward-facing rectangular range-bearing output. Far range is at the
+    # top, near range at the bottom, and horizontal pixels use u=fx*tan(bearing)
+    # rather than a linear beam-index stretch. A zero height preserves native
+    # radial resolution; zero width derives it from the aspect ratio.
+    rectified_width: 0
+    rectified_height: 0
+    rectified_aspect_ratio: 1.7777777777777777
+
+    # Perspective view obtained by intersecting virtual-camera rays with the
+    # stamped surface plane, then sampling the ping at that physical
+    # range/bearing. Empty sensor frame uses the ping header; empty optical
+    # frame derives */optical_frame from that projection frame. The output is
+    # intentionally named
+    # drawn_sonar_floor_projected: this model is valid for the plane, not for
+    # arbitrary relief or obstacles above it. Its vertical intrinsics span the
+    # ping's transmitted elevation aperture; fx and fy therefore normally
+    # differ for the wide, vertically narrow Oculus fan.
+    floor_projection_sensor_frame: ""
+    floor_projection_optical_frame: ""
+    floor_projection_surface_frame: "sea_floor_estimate"
+    floor_projection_tf_timeout: 0.05
+
     # Payload layout of the subscribed SonarImageData: beam_major is the
     # standards-compliant order current drivers emit; range_major matches
     # pre-fix recordings. Operational launches override this per source.
@@ -48,7 +70,8 @@
     # Publishing options
     publish_histogram: false  # Publish histogram data
     publish_timing: true      # Publish timing information
-    # One-release migration aliases. New consumers use fan_info and
-    # drawn_sonar_polar; disable these after old bags/dashboards are retired.
+    # One-release migration aliases. New consumers use fan_info for the fan,
+    # rectified_info for the forward-facing rectangle, and drawn_sonar_polar
+    # only for raw-raster inspection. Disable these after old consumers retire.
     publish_legacy_camera_info: true
     publish_legacy_rect_topic: true

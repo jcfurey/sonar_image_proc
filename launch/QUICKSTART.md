@@ -70,6 +70,10 @@ After launching, you'll get:
 - `/oculus/drawn_sonar_clean` - Annotation-free machine-vision image
 - `/oculus/drawn_sonar_osd` - Compatibility alias of `drawn_sonar`
 - `/oculus/drawn_sonar_polar` - Rotated range×bearing inspection view
+- `/oculus/drawn_sonar_rectified` - Forward-facing 16:9 rectilinear range×bearing view
+- `/oculus/rectified_info` - Exact pixel-to-range/bearing mapping for the rectified view
+- `/oculus/drawn_sonar_floor_projected` - Head-pitch-aware virtual-camera view of `sea_floor_estimate`
+- `/oculus/floor_projected_camera_info` - Pinhole geometry for the floor-projected view
 - `/oculus/fan_info` - Stamped orthographic geometry for the Cartesian fan
 - `/oculus/drawn_sonar_rect` - Deprecated alias of `drawn_sonar_polar`
 

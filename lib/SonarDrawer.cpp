@@ -122,6 +122,90 @@ SonarDrawer::FanGeometry SonarDrawer::fanImageGeometry(
   return g;
 }
 
+SonarDrawer::RectifiedGeometry SonarDrawer::rectifiedImageGeometry(
+    const AbstractSonarInterface &ping, int outputWidth, int outputHeight,
+    float aspectRatio) const {
+  RectifiedGeometry g;
+  if (ping.nRanges() < 2 || ping.nAzimuth() < 2 || outputWidth < 0 ||
+      outputHeight < 0 || !std::isfinite(aspectRatio) ||
+      aspectRatio <= 0.0f || aspectRatio > 10.0f) {
+    return g;
+  }
+
+  const auto rangeBounds = ping.rangeBounds();
+  const auto bearingBounds = ping.azimuthBounds();
+  g.min_range = rangeBounds.first;
+  g.max_range = effectiveMaxRange(ping);
+  g.min_bearing = bearingBounds.first;
+  g.max_bearing = bearingBounds.second;
+
+  // A rectilinear horizontal coordinate is monotonic only inside the forward
+  // pinhole hemisphere. Oculus heads are at most +/-65 degrees, but reject a
+  // malformed message here rather than wrapping tan() through infinity.
+  constexpr float kHalfPi = static_cast<float>(M_PI / 2.0);
+  if (!std::isfinite(g.min_range) || !std::isfinite(g.max_range) ||
+      !std::isfinite(g.min_bearing) || !std::isfinite(g.max_bearing) ||
+      g.max_range <= g.min_range || g.min_bearing <= -kHalfPi ||
+      g.max_bearing >= kHalfPi || g.max_bearing <= g.min_bearing) {
+    return RectifiedGeometry();
+  }
+
+  if (outputHeight > 0) {
+    g.height = outputHeight;
+  } else {
+    // Retain approximately one row per source range interval when max_range
+    // clips a ping. ceil() avoids throwing away the partially represented last
+    // interval; the unclipped result is exactly nRanges.
+    const float fullSpan = rangeBounds.second - rangeBounds.first;
+    if (!(fullSpan > 0.0f)) return RectifiedGeometry();
+    const float represented =
+        (g.max_range - g.min_range) / fullSpan * (ping.nRanges() - 1);
+    g.height = static_cast<int>(std::ceil(represented)) + 1;
+  }
+
+  constexpr int kMaxOutputDimension = 16384;
+  if (g.height < 2 || g.height > kMaxOutputDimension) {
+    return RectifiedGeometry();
+  }
+  g.width = outputWidth > 0
+                ? outputWidth
+                : static_cast<int>(std::lround(g.height * aspectRatio));
+  if (g.width < 2 || g.width > kMaxOutputDimension) {
+    return RectifiedGeometry();
+  }
+
+  const float minTan = std::tan(g.min_bearing);
+  const float maxTan = std::tan(g.max_bearing);
+  const float tanSpan = maxTan - minTan;
+  if (!std::isfinite(tanSpan) || !(tanSpan > 0.0f)) {
+    return RectifiedGeometry();
+  }
+
+  g.horizontal_focal_length = (g.width - 1) / tanSpan;
+  g.principal_point_u = -g.horizontal_focal_length * minTan;
+  g.meters_per_row = (g.max_range - g.min_range) / (g.height - 1);
+  if (!g.valid()) return RectifiedGeometry();
+  return g;
+}
+
+cv::Mat SonarDrawer::rectifyRangeBearingImage(
+    const AbstractSonarInterface &ping, const cv::Mat &rangeBearingImage,
+    const RectifiedGeometry &geometry) {
+  cv::Mat out;
+  if (!geometry.valid() || rangeBearingImage.empty() ||
+      rangeBearingImage.rows != ping.nAzimuth() ||
+      rangeBearingImage.cols != ping.nRanges()) {
+    return out;
+  }
+
+  const CachedRectifiedMap::MapPair maps(_rectified_map(ping, geometry));
+  if (maps.first.empty() || maps.second.empty()) return out;
+
+  cv::remap(rangeBearingImage, out, maps.first, maps.second, cv::INTER_LINEAR,
+            cv::BORDER_CONSTANT, cv::Scalar::all(0));
+  return out;
+}
+
 // Fills the rectangular image one azimuth (one row) at a time.  Templated on
 // the pixel type so the type dispatch happens once per image rather than
 // once per pixel.
@@ -410,6 +494,268 @@ bool SonarDrawer::CachedMap::Entry::isValidFor(
   if (_azimuths != ping.azimuths()) return false;
 
   return Cached::isValid(ping);
+}
+
+// ==== SonarDrawer::CachedRectifiedMap ====
+
+namespace {
+
+bool validateCoordinateTable(const std::vector<float> &samples,
+                             bool &ascending) {
+  if (samples.size() < 2 || !std::isfinite(samples.front()) ||
+      !std::isfinite(samples.back()) || samples.back() == samples.front()) {
+    return false;
+  }
+  ascending = samples.back() > samples.front();
+  for (size_t i = 1; i < samples.size(); ++i) {
+    if (!std::isfinite(samples[i - 1]) || !std::isfinite(samples[i]))
+      return false;
+    if (ascending ? samples[i] <= samples[i - 1]
+                  : samples[i] >= samples[i - 1])
+      return false;
+  }
+  return true;
+}
+
+// Convert a physical coordinate into a fractional sample index using an
+// already-validated, possibly non-uniform or descending coordinate table.
+// Returning -1 deliberately sends out-of-domain queries through cv::remap's
+// BORDER_CONSTANT path. Validation is separate because this runs per pixel.
+float coordinateToIndex(const std::vector<float> &samples, float value,
+                        bool ascending) {
+  if (!std::isfinite(value)) return -1.0f;
+  const float low = ascending ? samples.front() : samples.back();
+  const float high = ascending ? samples.back() : samples.front();
+  constexpr float kTolerance = 1e-6f;
+  if (value < low - kTolerance || value > high + kTolerance) return -1.0f;
+  value = std::clamp(value, low, high);
+
+  size_t lo = 0;
+  size_t hi = samples.size() - 1;
+  while (hi - lo > 1) {
+    const size_t mid = (lo + hi) / 2;
+    const bool before =
+        ascending ? samples[mid] <= value : samples[mid] >= value;
+    if (before)
+      lo = mid;
+    else
+      hi = mid;
+  }
+
+  const float span = samples[hi] - samples[lo];
+  if (std::abs(span) <= std::numeric_limits<float>::epsilon()) return -1.0f;
+  return static_cast<float>(lo) + (value - samples[lo]) / span;
+}
+
+bool sameRectifiedGeometry(
+    const SonarDrawer::RectifiedGeometry &lhs,
+    const SonarDrawer::RectifiedGeometry &rhs) {
+  return lhs.width == rhs.width && lhs.height == rhs.height &&
+         lhs.horizontal_focal_length == rhs.horizontal_focal_length &&
+         lhs.principal_point_u == rhs.principal_point_u &&
+         lhs.meters_per_row == rhs.meters_per_row &&
+         lhs.min_range == rhs.min_range && lhs.max_range == rhs.max_range &&
+         lhs.min_bearing == rhs.min_bearing &&
+         lhs.max_bearing == rhs.max_bearing;
+}
+
+bool finiteTransform(const SonarDrawer::RigidTransform &transform) {
+  for (int row = 0; row < 3; ++row) {
+    if (!std::isfinite(transform.translation[row])) return false;
+    for (int col = 0; col < 3; ++col) {
+      if (!std::isfinite(transform.rotation(row, col))) return false;
+    }
+  }
+  return true;
+}
+
+float beamwidthAt(const std::vector<float> &beamwidths, float beamIndex,
+                  int beamCount) {
+  if (beamwidths.size() == 1) return beamwidths.front();
+  if (beamwidths.size() != static_cast<size_t>(beamCount) ||
+      !std::isfinite(beamIndex) || beamIndex < 0.0f ||
+      beamIndex > beamCount - 1) {
+    return -1.0f;
+  }
+  const int lower = static_cast<int>(std::floor(beamIndex));
+  const int upper = std::min(lower + 1, beamCount - 1);
+  const float fraction = beamIndex - lower;
+  return beamwidths[lower] * (1.0f - fraction) +
+         beamwidths[upper] * fraction;
+}
+
+}  // namespace
+
+cv::Mat SonarDrawer::projectOntoPlaneImage(
+    const AbstractSonarInterface &ping, const cv::Mat &rangeBearingImage,
+    const PinholeGeometry &camera,
+    const RigidTransform &sensorFromCamera, const Plane &planeInSensor,
+    const std::vector<float> &elevationBeamwidths) const {
+  cv::Mat output;
+  if (!camera.valid() || !finiteTransform(sensorFromCamera) ||
+      rangeBearingImage.empty() ||
+      rangeBearingImage.rows != ping.nAzimuth() ||
+      rangeBearingImage.cols != ping.nRanges() || ping.nAzimuth() < 2 ||
+      ping.nRanges() < 2 ||
+      (elevationBeamwidths.size() != 1 &&
+       elevationBeamwidths.size() != static_cast<size_t>(ping.nAzimuth()))) {
+    return output;
+  }
+
+  const float normalMagnitude = cv::norm(planeInSensor.normal);
+  if (!std::isfinite(normalMagnitude) || normalMagnitude <= 1e-6f ||
+      !std::isfinite(planeInSensor.offset)) {
+    return output;
+  }
+  const cv::Vec3f planeNormal = planeInSensor.normal / normalMagnitude;
+  const float planeOffset = planeInSensor.offset / normalMagnitude;
+  const float originSide =
+      planeNormal.dot(sensorFromCamera.translation) + planeOffset;
+  if (!std::isfinite(originSide)) return output;
+
+  for (const float beamwidth : elevationBeamwidths) {
+    if (!std::isfinite(beamwidth) || beamwidth <= 0.0f ||
+        beamwidth >= static_cast<float>(M_PI)) {
+      return output;
+    }
+  }
+
+  cv::Mat rangeMap(camera.height, camera.width, CV_32FC1,
+                   cv::Scalar(-1.0f));
+  cv::Mat bearingMap(camera.height, camera.width, CV_32FC1,
+                     cv::Scalar(-1.0f));
+  const float maximumRange = effectiveMaxRange(ping);
+  const auto rangeBounds = ping.rangeBounds();
+  bool rangesAscending = false;
+  bool bearingsAscending = false;
+  if (!validateCoordinateTable(ping.ranges(), rangesAscending) ||
+      !validateCoordinateTable(ping.azimuths(), bearingsAscending)) {
+    return output;
+  }
+
+  cv::parallel_for_(cv::Range(0, camera.height), [&](const cv::Range &rows) {
+    for (int v = rows.start; v < rows.end; ++v) {
+      float *const rangeRow = rangeMap.ptr<float>(v);
+      float *const bearingRow = bearingMap.ptr<float>(v);
+      const float cameraY = (v - camera.cy) / camera.fy;
+      for (int u = 0; u < camera.width; ++u) {
+        const cv::Vec3f cameraRay((u - camera.cx) / camera.fx, cameraY,
+                                  1.0f);
+        const cv::Vec3f sensorRay =
+            sensorFromCamera.rotation * cameraRay;
+        const float denominator = planeNormal.dot(sensorRay);
+        if (!std::isfinite(denominator) || std::abs(denominator) <= 1e-7f)
+          continue;
+
+        const float rayScale = -originSide / denominator;
+        if (!std::isfinite(rayScale) || rayScale <= 0.0f) continue;
+        const cv::Vec3f point =
+            sensorFromCamera.translation + sensorRay * rayScale;
+        const float range = cv::norm(point);
+        if (!std::isfinite(range) || range < rangeBounds.first ||
+            range > maximumRange) {
+          continue;
+        }
+
+        // sonar projection frame convention: +x elevation/down, +y left,
+        // +z forward. Bearing is therefore atan2(-y, z).
+        const float horizontalRange = std::hypot(point[1], point[2]);
+        const float bearing = std::atan2(-point[1], point[2]);
+        const float elevation = std::atan2(point[0], horizontalRange);
+        const float bearingIndex = coordinateToIndex(
+            ping.azimuths(), bearing, bearingsAscending);
+        if (bearingIndex < 0.0f) continue;
+        const float beamwidth =
+            beamwidthAt(elevationBeamwidths, bearingIndex, ping.nAzimuth());
+        if (!(beamwidth > 0.0f) ||
+            std::abs(elevation) > 0.5f * beamwidth + 1e-6f) {
+          continue;
+        }
+
+        const float rangeIndex =
+            coordinateToIndex(ping.ranges(), range, rangesAscending);
+        if (rangeIndex < 0.0f) continue;
+        rangeRow[u] = rangeIndex;
+        bearingRow[u] = bearingIndex;
+      }
+    }
+  });
+
+  cv::remap(rangeBearingImage, output, rangeMap, bearingMap, cv::INTER_LINEAR,
+            cv::BORDER_CONSTANT, cv::Scalar::all(0));
+  return output;
+}
+
+SonarDrawer::CachedRectifiedMap::MapPair
+SonarDrawer::CachedRectifiedMap::operator()(
+    const AbstractSonarInterface &ping,
+    const RectifiedGeometry &geometry) {
+  for (auto &entry : _entries) {
+    if (entry.isValidFor(ping, geometry))
+      return std::make_pair(entry._map1, entry._map2);
+  }
+
+  Entry &entry = _entries[_nextEvict];
+  _nextEvict = (_nextEvict + 1) % kNumEntries;
+  entry.create(ping, geometry);
+  return std::make_pair(entry._map1, entry._map2);
+}
+
+bool SonarDrawer::CachedRectifiedMap::Entry::isValidFor(
+    const AbstractSonarInterface &ping,
+    const RectifiedGeometry &geometry) const {
+  return !_map1.empty() && !_map2.empty() &&
+         sameRectifiedGeometry(_geometry, geometry) &&
+         _ranges == ping.ranges() && _azimuths == ping.azimuths();
+}
+
+void SonarDrawer::CachedRectifiedMap::Entry::create(
+    const AbstractSonarInterface &ping,
+    const RectifiedGeometry &geometry) {
+  _map1.release();
+  _map2.release();
+  _geometry = RectifiedGeometry();
+  _ranges.clear();
+  _azimuths.clear();
+  if (!geometry.valid() || ping.nRanges() < 2 || ping.nAzimuth() < 2)
+    return;
+
+  bool rangesAscending = false;
+  bool bearingsAscending = false;
+  if (!validateCoordinateTable(ping.ranges(), rangesAscending) ||
+      !validateCoordinateTable(ping.azimuths(), bearingsAscending)) {
+    return;
+  }
+
+  std::vector<float> rangeIndices(geometry.height, -1.0f);
+  for (int v = 0; v < geometry.height; ++v) {
+    const float range = geometry.max_range - v * geometry.meters_per_row;
+    rangeIndices[v] =
+        coordinateToIndex(ping.ranges(), range, rangesAscending);
+  }
+
+  std::vector<float> bearingIndices(geometry.width, -1.0f);
+  for (int u = 0; u < geometry.width; ++u) {
+    const float bearing = std::atan(
+        (u - geometry.principal_point_u) /
+        geometry.horizontal_focal_length);
+    bearingIndices[u] =
+        coordinateToIndex(ping.azimuths(), bearing, bearingsAscending);
+  }
+
+  // Source layout is [bearing row, range column]. cv::remap therefore wants
+  // (source range index, source bearing index) at every destination pixel.
+  cv::Mat floatingMap(geometry.height, geometry.width, CV_32FC2);
+  for (int v = 0; v < geometry.height; ++v) {
+    cv::Vec2f *const row = floatingMap.ptr<cv::Vec2f>(v);
+    for (int u = 0; u < geometry.width; ++u)
+      row[u] = cv::Vec2f(rangeIndices[v], bearingIndices[u]);
+  }
+  cv::convertMaps(floatingMap, cv::Mat(), _map1, _map2, CV_16SC2);
+
+  _geometry = geometry;
+  _ranges = ping.ranges();
+  _azimuths = ping.azimuths();
 }
 
 // === SonarDrawer::CachedOverlay ===

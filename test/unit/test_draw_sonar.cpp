@@ -68,6 +68,203 @@ TEST(TestDrawSonar, RectangularImagePreservesRangeMajorLayout) {
   EXPECT_FLOAT_EQ(rect.at<float>(0, 2), 0.0f);
 }
 
+TEST(TestDrawSonar, RectifiedGeometryIsNativeHeightAndRectilinearWidth) {
+  const float edge = std::atan(1.0f);
+  TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, {-edge, 0.0f, edge});
+
+  sonar_image_proc::SonarDrawer drawer;
+  const auto geometry = drawer.rectifiedImageGeometry(ping);
+
+  ASSERT_TRUE(geometry.valid());
+  EXPECT_EQ(geometry.height, 5);  // one row per native range bin
+  EXPECT_EQ(geometry.width, 9);   // round(5 * 16/9)
+  EXPECT_FLOAT_EQ(geometry.horizontal_focal_length, 4.0f);
+  EXPECT_FLOAT_EQ(geometry.principal_point_u, 4.0f);
+  EXPECT_FLOAT_EQ(geometry.meters_per_row, 1.0f);
+  EXPECT_FLOAT_EQ(geometry.min_range, 0.0f);
+  EXPECT_FLOAT_EQ(geometry.max_range, 4.0f);
+}
+
+TEST(TestDrawSonar, RectifiedImageHasCameraStyleOrientation) {
+  const float edge = std::atan(1.0f);
+  TestPing ping({0.0f, 1.0f, 2.0f}, {-edge, 0.0f, edge});
+  cv::Mat source = cv::Mat::zeros(3, 3, CV_32FC1);
+  source.at<float>(0, 0) = 0.25f;  // near, negative bearing
+  source.at<float>(1, 1) = 0.50f;  // middle range, boresight
+  source.at<float>(2, 2) = 1.00f;  // far, positive bearing
+
+  sonar_image_proc::SonarDrawer drawer;
+  const auto geometry = drawer.rectifiedImageGeometry(ping, 3, 3);
+  const cv::Mat rectified =
+      drawer.rectifyRangeBearingImage(ping, source, geometry);
+
+  ASSERT_EQ(rectified.size(), cv::Size(3, 3));
+  EXPECT_NEAR(rectified.at<float>(2, 0), 0.25f, 1e-6f);
+  EXPECT_NEAR(rectified.at<float>(1, 1), 0.50f, 1e-6f);
+  EXPECT_NEAR(rectified.at<float>(0, 2), 1.00f, 1e-6f);
+}
+
+TEST(TestDrawSonar, RectifiedImageUsesActualNonUniformRangeTable) {
+  const float edge = std::atan(1.0f);
+  TestPing ping({0.0f, 0.25f, 2.0f}, {-edge, 0.0f, edge});
+  cv::Mat source(3, 3, CV_32FC1);
+  for (int a = 0; a < source.rows; ++a) {
+    source.at<float>(a, 0) = 0.0f;
+    source.at<float>(a, 1) = 0.25f;
+    source.at<float>(a, 2) = 2.0f;
+  }
+
+  sonar_image_proc::SonarDrawer drawer;
+  const auto geometry = drawer.rectifiedImageGeometry(ping, 3, 5);
+  const cv::Mat rectified =
+      drawer.rectifyRangeBearingImage(ping, source, geometry);
+
+  ASSERT_EQ(rectified.size(), cv::Size(3, 5));
+  // Linear interpolation against the physical range table reproduces this
+  // ramp. Treating the three input columns as uniformly spaced would not.
+  EXPECT_NEAR(rectified.at<float>(1, 1), 1.5f, 0.03f);
+  EXPECT_NEAR(rectified.at<float>(2, 1), 1.0f, 0.03f);
+  EXPECT_NEAR(rectified.at<float>(3, 1), 0.5f, 0.03f);
+}
+
+TEST(TestDrawSonar, RectifiedCacheInvalidatesForChangedInteriorRange) {
+  const float edge = std::atan(1.0f);
+  TestPing first_ping({0.0f, 0.25f, 2.0f}, {-edge, 0.0f, edge});
+  TestPing second_ping({0.0f, 1.75f, 2.0f}, {-edge, 0.0f, edge});
+  cv::Mat source = cv::Mat::zeros(3, 3, CV_32FC1);
+  source.col(1).setTo(1.0f);
+
+  sonar_image_proc::SonarDrawer drawer;
+  const auto first_geometry = drawer.rectifiedImageGeometry(first_ping, 3, 5);
+  const auto second_geometry =
+      drawer.rectifiedImageGeometry(second_ping, 3, 5);
+  const cv::Mat first =
+      drawer.rectifyRangeBearingImage(first_ping, source, first_geometry);
+  const cv::Mat second =
+      drawer.rectifyRangeBearingImage(second_ping, source, second_geometry);
+
+  ASSERT_EQ(first.size(), second.size());
+  EXPECT_GT(cv::norm(first, second, cv::NORM_INF), 0.2);
+}
+
+TEST(TestDrawSonar, RectifiedImageUsesActualNonUniformBearingTable) {
+  const float edge = std::atan(1.0f);
+  const std::vector<float> bearings{-edge, -0.2f, edge};
+  TestPing ping({0.0f, 1.0f, 2.0f}, bearings);
+  cv::Mat source(3, 3, CV_32FC1);
+  for (int a = 0; a < source.rows; ++a)
+    source.row(a).setTo(bearings[a]);
+
+  sonar_image_proc::SonarDrawer drawer;
+  const auto geometry = drawer.rectifiedImageGeometry(ping, 5, 3);
+  const cv::Mat rectified =
+      drawer.rectifyRangeBearingImage(ping, source, geometry);
+
+  ASSERT_EQ(rectified.size(), cv::Size(5, 3));
+  for (int u = 0; u < rectified.cols; ++u) {
+    const float expected = std::atan(
+        (u - geometry.principal_point_u) /
+        geometry.horizontal_focal_length);
+    EXPECT_NEAR(rectified.at<float>(1, u), expected, 0.03f) << "u=" << u;
+  }
+}
+
+sonar_image_proc::SonarDrawer::RigidTransform sonarFromOptical() {
+  sonar_image_proc::SonarDrawer::RigidTransform transform;
+  // Camera optical: +x right, +y down, +z forward.
+  // Sonar projection: +x down, +y left, +z forward.
+  transform.rotation = cv::Matx33f(0.0f, 1.0f, 0.0f,
+                                   -1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f);
+  return transform;
+}
+
+sonar_image_proc::SonarDrawer::PinholeGeometry testPinhole(
+    int width = 5, int height = 5) {
+  sonar_image_proc::SonarDrawer::PinholeGeometry camera;
+  camera.width = width;
+  camera.height = height;
+  camera.fx = 2.0f;
+  camera.fy = 2.0f;
+  camera.cx = 0.5f * (width - 1);
+  camera.cy = 0.5f * (height - 1);
+  return camera;
+}
+
+TEST(TestDrawSonar, PlaneProjectionPlacesSurfaceOnEitherSideOfHorizon) {
+  const float edge = std::atan(1.0f);
+  TestPing ping({0.5f, 1.0f, std::sqrt(2.0f), 2.0f, 3.0f},
+                {-edge, 0.0f, edge});
+  const cv::Mat source = cv::Mat::ones(3, 5, CV_32FC1);
+  const auto camera = testPinhole();
+  const auto transform = sonarFromOptical();
+  sonar_image_proc::SonarDrawer drawer;
+
+  // +x is down in the sonar projection frame. x=+1 must therefore occupy
+  // the lower image, while x=-1 must occupy the upper image. This is the
+  // property a fixed "seafloor is at the bottom" warp cannot satisfy.
+  sonar_image_proc::SonarDrawer::Plane below;
+  below.normal = cv::Vec3f(1.0f, 0.0f, 0.0f);
+  below.offset = -1.0f;
+  const cv::Mat belowImage = drawer.projectOntoPlaneImage(
+      ping, source, camera, transform, below, {2.4f});
+  ASSERT_EQ(belowImage.size(), cv::Size(5, 5));
+  EXPECT_GT(belowImage.at<float>(4, 2), 0.9f);
+  EXPECT_FLOAT_EQ(belowImage.at<float>(0, 2), 0.0f);
+
+  sonar_image_proc::SonarDrawer::Plane above = below;
+  above.offset = 1.0f;
+  const cv::Mat aboveImage = drawer.projectOntoPlaneImage(
+      ping, source, camera, transform, above, {2.4f});
+  ASSERT_EQ(aboveImage.size(), cv::Size(5, 5));
+  EXPECT_GT(aboveImage.at<float>(0, 2), 0.9f);
+  EXPECT_FLOAT_EQ(aboveImage.at<float>(4, 2), 0.0f);
+}
+
+TEST(TestDrawSonar, PlaneProjectionRespectsVerticalAperture) {
+  const float edge = std::atan(1.0f);
+  TestPing ping({0.5f, 1.0f, std::sqrt(2.0f), 2.0f, 3.0f},
+                {-edge, 0.0f, edge});
+  const cv::Mat source = cv::Mat::ones(3, 5, CV_32FC1);
+  sonar_image_proc::SonarDrawer::Plane below;
+  below.normal = cv::Vec3f(1.0f, 0.0f, 0.0f);
+  below.offset = -1.0f;
+
+  sonar_image_proc::SonarDrawer drawer;
+  const cv::Mat projected = drawer.projectOntoPlaneImage(
+      ping, source, testPinhole(), sonarFromOptical(), below,
+      {20.0f * static_cast<float>(M_PI) / 180.0f});
+
+  ASSERT_EQ(projected.size(), cv::Size(5, 5));
+  // The x=z floor ray is 45 degrees below boresight and cannot have produced
+  // an echo through a +/-10 degree transmit aperture.
+  EXPECT_FLOAT_EQ(projected.at<float>(4, 2), 0.0f);
+}
+
+TEST(TestDrawSonar, PlaneProjectionUnbowsAFrontoParallelWall) {
+  const float edge = std::atan(1.0f);
+  const float edgeRange = std::sqrt(8.0f);
+  TestPing ping({2.0f, edgeRange}, {-edge, 0.0f, edge});
+  cv::Mat source = cv::Mat::zeros(3, 2, CV_32FC1);
+  // A wall at sonar-forward z=2 appears as a bowed range trace in the native
+  // raster: r=2 on boresight and r=sqrt(8) at +/-45 degrees.
+  source.at<float>(0, 1) = 1.0f;
+  source.at<float>(1, 0) = 1.0f;
+  source.at<float>(2, 1) = 1.0f;
+
+  sonar_image_proc::SonarDrawer::Plane wall;
+  wall.normal = cv::Vec3f(0.0f, 0.0f, 1.0f);
+  wall.offset = -2.0f;
+  sonar_image_proc::SonarDrawer drawer;
+  const cv::Mat projected = drawer.projectOntoPlaneImage(
+      ping, source, testPinhole(5, 3), sonarFromOptical(), wall, {1.0f});
+
+  ASSERT_EQ(projected.size(), cv::Size(5, 3));
+  EXPECT_GT(projected.at<float>(1, 0), 0.9f);
+  EXPECT_GT(projected.at<float>(1, 2), 0.9f);
+  EXPECT_GT(projected.at<float>(1, 4), 0.9f);
+}
+
 TEST(TestDrawSonar, GoldenFanHashPinsTheWholeDrawChain) {
   // Golden regression over the full rect -> remap chain: a deterministic
   // ping with structure at known (range, azimuth) cells, drawn at a fixed
