@@ -584,7 +584,305 @@ float beamwidthAt(const std::vector<float> &beamwidths, float beamIndex,
          beamwidths[upper] * fraction;
 }
 
+float quantileInPlace(std::vector<float> &values, float fraction) {
+  if (values.empty()) return std::numeric_limits<float>::quiet_NaN();
+  const size_t index = static_cast<size_t>(std::floor(
+      std::clamp(fraction, 0.0f, 1.0f) * (values.size() - 1)));
+  std::nth_element(values.begin(), values.begin() + index, values.end());
+  return values[index];
+}
+
+struct FloorwardAperture {
+  float maximum = -std::numeric_limits<float>::infinity();
+  float minimum = std::numeric_limits<float>::infinity();
+};
+
+FloorwardAperture floorwardAperture(const cv::Vec3f &platformUp,
+                                    float azimuth, float beamwidth) {
+  FloorwardAperture aperture;
+  // A small fixed angular grid is inexpensive (normally 512*65 evaluations
+  // per ping) and avoids fragile branch-cut handling around the analytic
+  // extrema of A*sin(e)+B*cos(e). The 20-degree Oculus aperture is sampled at
+  // 0.3125 degree intervals, much finer than the range-domain detector.
+  constexpr int kElevationIntervals = 64;
+  for (int sample = 0; sample <= kElevationIntervals; ++sample) {
+    const float elevation =
+        -0.5f * beamwidth +
+        beamwidth * static_cast<float>(sample) / kElevationIntervals;
+    const float cosElevation = std::cos(elevation);
+    const cv::Vec3f ray(std::sin(elevation),
+                        -cosElevation * std::sin(azimuth),
+                        cosElevation * std::cos(azimuth));
+    // platformUp points away from the floor. A positive value therefore means
+    // this ray travels toward it.
+    const float floorward = -platformUp.dot(ray);
+    aperture.maximum = std::max(aperture.maximum, floorward);
+    aperture.minimum = std::min(aperture.minimum, floorward);
+  }
+  return aperture;
+}
+
+float columnMean(const std::vector<float> &prefix, int columns, int column,
+                 int begin, int end) {
+  if (begin < 0 || end <= begin) return 0.0f;
+  return (prefix[static_cast<size_t>(end) * columns + column] -
+          prefix[static_cast<size_t>(begin) * columns + column]) /
+         static_cast<float>(end - begin);
+}
+
 }  // namespace
+
+SonarDrawer::FloorEstimate SonarDrawer::estimateFloorPlaneFromImage(
+    const AbstractSonarInterface &ping,
+    const cv::Vec3f &platform_up_in_sensor,
+    const std::vector<float> &elevationBeamwidths,
+    const FloorDetectionConfig &config) const {
+  FloorEstimate estimate;
+  const int rangeCount = ping.nRanges();
+  const int beamCount = ping.nAzimuth();
+  if (!config.valid() || rangeCount < 8 || beamCount < 2 ||
+      (elevationBeamwidths.size() != 1 &&
+       elevationBeamwidths.size() != static_cast<size_t>(beamCount))) {
+    return estimate;
+  }
+
+  const float normalMagnitude = cv::norm(platform_up_in_sensor);
+  if (!std::isfinite(normalMagnitude) || normalMagnitude <= 1e-6f)
+    return estimate;
+  const cv::Vec3f platformUp = platform_up_in_sensor / normalMagnitude;
+
+  bool rangesAscending = false;
+  bool bearingsAscending = false;
+  if (!validateCoordinateTable(ping.ranges(), rangesAscending) ||
+      !rangesAscending ||
+      !validateCoordinateTable(ping.azimuths(), bearingsAscending)) {
+    return estimate;
+  }
+
+  for (const float beamwidth : elevationBeamwidths) {
+    if (!std::isfinite(beamwidth) || beamwidth <= 0.0f ||
+        beamwidth >= static_cast<float>(M_PI)) {
+      return estimate;
+    }
+  }
+
+  const int edgeWindow = config.edge_window_bins;
+  if (rangeCount <= 2 * edgeWindow + 4) return estimate;
+  const float rangeMinimum = std::max(
+      config.minimum_range, ping.ranges()[static_cast<size_t>(edgeWindow)]);
+  const float configuredMaximum =
+      config.maximum_range > 0.0f ? config.maximum_range : ping.maxRange();
+  const float rangeMaximum = std::min(
+      configuredMaximum,
+      ping.ranges()[static_cast<size_t>(rangeCount - edgeWindow - 1)]);
+  if (!std::isfinite(rangeMinimum) || !std::isfinite(rangeMaximum) ||
+      !(rangeMaximum > rangeMinimum)) {
+    return estimate;
+  }
+
+  // Work in a monotone compressed intensity domain, then normalize each beam
+  // independently. The vendor payload is highly skewed and individual receive
+  // beams carry different gain; a global linear threshold makes the floor
+  // disappear in quiet beams and lets one hot beam dominate the fit.
+  cv::Mat normalized(rangeCount, beamCount, CV_32FC1);
+  constexpr float kLogScale = 255.0f;
+  const float inverseLogRange = 1.0f / std::log1p(kLogScale);
+  for (int range = 0; range < rangeCount; ++range) {
+    float *const row = normalized.ptr<float>(range);
+    for (int beam = 0; beam < beamCount; ++beam) {
+      float intensity = ping.intensity_float(
+          AzimuthRangeIndices(static_cast<size_t>(beam),
+                              static_cast<size_t>(range)));
+      if (!std::isfinite(intensity)) intensity = 0.0f;
+      intensity = std::clamp(intensity, 0.0f, 1.0f);
+      row[beam] = std::log1p(kLogScale * intensity) * inverseLogRange;
+    }
+  }
+
+  std::vector<float> samples(static_cast<size_t>(rangeCount));
+  for (int beam = 0; beam < beamCount; ++beam) {
+    for (int range = 0; range < rangeCount; ++range)
+      samples[static_cast<size_t>(range)] =
+          normalized.at<float>(range, beam);
+    const float lower = quantileInPlace(samples, 0.10f);
+    const float upper = quantileInPlace(samples, 0.95f);
+    const float span = upper - lower;
+    for (int range = 0; range < rangeCount; ++range) {
+      float &value = normalized.at<float>(range, beam);
+      value = span > 1e-6f
+                  ? std::clamp((value - lower) / span, 0.0f, 1.0f)
+                  : 0.0f;
+    }
+  }
+
+  cv::Mat smoothed;
+  cv::GaussianBlur(normalized, smoothed, cv::Size(), 3.0, 2.0,
+                   cv::BORDER_REPLICATE);
+
+  // Per-beam cumulative sums make the persistence and edge windows O(1) for
+  // each plane candidate.
+  std::vector<float> prefix(
+      static_cast<size_t>(rangeCount + 1) * beamCount, 0.0f);
+  for (int range = 0; range < rangeCount; ++range) {
+    const float *const row = smoothed.ptr<float>(range);
+    for (int beam = 0; beam < beamCount; ++beam) {
+      prefix[static_cast<size_t>(range + 1) * beamCount + beam] =
+          prefix[static_cast<size_t>(range) * beamCount + beam] + row[beam];
+    }
+  }
+
+  std::vector<float> nearestFloorward(static_cast<size_t>(beamCount), -1.0f);
+  std::vector<float> farthestFloorward(static_cast<size_t>(beamCount), 0.0f);
+  float maximumFloorward = 0.0f;
+  int reachableBeams = 0;
+  for (int beam = 0; beam < beamCount; ++beam) {
+    const float beamwidth = elevationBeamwidths.size() == 1
+                                ? elevationBeamwidths.front()
+                                : elevationBeamwidths[beam];
+    const auto aperture =
+        floorwardAperture(platformUp, ping.azimuth(beam), beamwidth);
+    nearestFloorward[beam] = aperture.maximum;
+    // When the aperture reaches or crosses the platform horizon, the floor
+    // band has no finite far edge. This is expected for a level or shallow
+    // head, not an error.
+    farthestFloorward[beam] = aperture.minimum > 1e-5f
+                                  ? aperture.minimum
+                                  : 0.0f;
+    if (aperture.maximum > 1e-5f) {
+      maximumFloorward = std::max(maximumFloorward, aperture.maximum);
+      ++reachableBeams;
+    }
+  }
+
+  const int minimumSupport = std::max(
+      2, static_cast<int>(std::ceil(config.minimum_support_fraction *
+                                    static_cast<float>(beamCount))));
+  if (reachableBeams < minimumSupport || !(maximumFloorward > 0.0f))
+    return estimate;
+
+  const float maximumDistance = rangeMaximum * maximumFloorward;
+  if (!std::isfinite(maximumDistance) || !(maximumDistance > 0.0f))
+    return estimate;
+
+  float bestScore = -std::numeric_limits<float>::infinity();
+  float bestDistance = 0.0f;
+  float bestSupport = 0.0f;
+  std::vector<float> beamScores;
+  beamScores.reserve(static_cast<size_t>(beamCount));
+  const float beforeExtent = 0.5f * config.persistence_range;
+  const float afterInset = 0.125f * config.persistence_range;
+
+  // One distance hypothesis per native range bin retains the sensor's radial
+  // precision without turning this display path into an unbounded optimizer.
+  for (int candidate = 1; candidate <= rangeCount; ++candidate) {
+    const float distance = maximumDistance *
+                           static_cast<float>(candidate) /
+                           static_cast<float>(rangeCount);
+    beamScores.clear();
+
+    for (int beam = 0; beam < beamCount; ++beam) {
+      const float qNear = nearestFloorward[beam];
+      if (!(qNear > 1e-5f)) continue;
+      const float entryRange = distance / qNear;
+      if (!std::isfinite(entryRange) || entryRange < rangeMinimum ||
+          entryRange > rangeMaximum) {
+        continue;
+      }
+
+      float exitRange = rangeMaximum;
+      const float qFar = farthestFloorward[beam];
+      if (qFar > 1e-5f)
+        exitRange = std::min(exitRange, distance / qFar);
+
+      const float entryIndex = coordinateToIndex(
+          ping.ranges(), entryRange, rangesAscending);
+      if (!(entryIndex >= 0.0f)) continue;
+      const int edgeIndex = static_cast<int>(std::lround(entryIndex));
+      if (edgeIndex < edgeWindow ||
+          edgeIndex + edgeWindow > rangeCount) {
+        continue;
+      }
+
+      const float beforeStartRange =
+          std::max(ping.minRange(), entryRange - beforeExtent);
+      const float afterStartRange = entryRange + afterInset;
+      const float afterEndRange = std::min(
+          {exitRange, entryRange + afterInset + config.persistence_range,
+           rangeMaximum});
+      if (!(afterEndRange > afterStartRange)) continue;
+
+      const float beforeStartIndex = coordinateToIndex(
+          ping.ranges(), beforeStartRange, rangesAscending);
+      const float afterStartIndex = coordinateToIndex(
+          ping.ranges(), afterStartRange, rangesAscending);
+      const float afterEndIndex = coordinateToIndex(
+          ping.ranges(), afterEndRange, rangesAscending);
+      if (beforeStartIndex < 0.0f || afterStartIndex < 0.0f ||
+          afterEndIndex < 0.0f) {
+        continue;
+      }
+
+      const int beforeBegin = std::clamp(
+          static_cast<int>(std::floor(beforeStartIndex)), 0, rangeCount);
+      const int beforeEnd = std::clamp(
+          static_cast<int>(std::ceil(entryIndex)), 0, rangeCount);
+      const int afterBegin = std::clamp(
+          static_cast<int>(std::floor(afterStartIndex)), 0, rangeCount);
+      const int afterEnd = std::clamp(
+          static_cast<int>(std::ceil(afterEndIndex)), 0, rangeCount);
+      if (beforeEnd - beforeBegin < 4 || afterEnd - afterBegin < 4)
+        continue;
+
+      const float edgeBefore = columnMean(
+          prefix, beamCount, beam, edgeIndex - edgeWindow, edgeIndex);
+      const float edgeAfter = columnMean(
+          prefix, beamCount, beam, edgeIndex, edgeIndex + edgeWindow);
+      const float before = columnMean(prefix, beamCount, beam, beforeBegin,
+                                      beforeEnd);
+      const float after = columnMean(prefix, beamCount, beam, afterBegin,
+                                     afterEnd);
+      const float edgeContrast = edgeAfter - edgeBefore;
+      const float persistentContrast = after - before;
+      beamScores.push_back(0.35f * edgeContrast +
+                           0.65f * persistentContrast);
+    }
+
+    if (static_cast<int>(beamScores.size()) < minimumSupport) continue;
+    const float geometricSupport =
+        static_cast<float>(beamScores.size()) / beamCount;
+    const int positiveBeams = static_cast<int>(std::count_if(
+        beamScores.begin(), beamScores.end(),
+        [](float value) { return value > 0.0f; }));
+    const float evidenceSupport =
+        static_cast<float>(positiveBeams) / beamCount;
+
+    // Score the weakest member of the best `minimumSupport` beams. This makes
+    // the configured support fraction mean what it says. The old fixed 20th
+    // percentile required roughly 80% of every wide ping to agree even though
+    // the deployed parameter promised 25%; real St. Louis floor returns cover
+    // the central fan strongly while pilings occupy the outer beams.
+    const auto supportRank =
+        beamScores.begin() + (beamScores.size() - minimumSupport);
+    std::nth_element(beamScores.begin(), supportRank, beamScores.end());
+    const float robustContrast = *supportRank;
+    const float score = robustContrast * std::sqrt(geometricSupport);
+    if (std::isfinite(score) && score > bestScore) {
+      bestScore = score;
+      bestDistance = distance;
+      bestSupport = evidenceSupport;
+    }
+  }
+
+  if (!std::isfinite(bestScore)) return estimate;
+  estimate.plane.normal = platformUp;
+  estimate.plane.offset = bestDistance;
+  estimate.distance = bestDistance;
+  estimate.score = bestScore;
+  estimate.support_fraction = bestSupport;
+  estimate.detected = bestScore >= config.minimum_score &&
+                      bestSupport >= config.minimum_support_fraction;
+  return estimate;
+}
 
 cv::Mat SonarDrawer::projectOntoPlaneImage(
     const AbstractSonarInterface &ping, const cv::Mat &rangeBearingImage,

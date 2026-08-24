@@ -71,14 +71,21 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
     this->declare_parameter("rectified_width", 0);
     this->declare_parameter("rectified_height", 0);
     this->declare_parameter("rectified_aspect_ratio", 16.0 / 9.0);
-    // True virtual-camera projection onto the stamped floor plane. Empty
-    // optical frame derives sonar*/optical_frame from the ping's
-    // sonar*/projection_frame; operational profiles pin it explicitly.
+    // True virtual-camera projection of an image-derived floor return. TF
+    // supplies the platform-up direction through the live pivot head; the
+    // coherent return band in each ping supplies the plane standoff. Empty
+    // optical frame derives sonar*/optical_frame from the ping's projection
+    // frame; operational profiles pin it explicitly.
     this->declare_parameter("floor_projection_sensor_frame", "");
     this->declare_parameter("floor_projection_optical_frame", "");
-    this->declare_parameter("floor_projection_surface_frame",
-                            "sea_floor_estimate");
+    this->declare_parameter("floor_projection_reference_frame", "base_link");
     this->declare_parameter("floor_projection_tf_timeout", 0.05);
+    this->declare_parameter("floor_projection_tf_max_delta", 0.02);
+    this->declare_parameter("floor_detection_min_range", 0.2);
+    this->declare_parameter("floor_detection_min_score", 0.05);
+    this->declare_parameter("floor_detection_min_support_fraction", 0.40);
+    this->declare_parameter("floor_detection_persistence_range", 0.50);
+    this->declare_parameter("floor_detection_edge_window_bins", 5);
     // marine_acoustic_msgs is beam-major. The rendering library retains its
     // range-major working image; older recorded images can opt into the
     // compatibility layout through bringup.
@@ -111,10 +118,23 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         this->get_parameter("floor_projection_sensor_frame").as_string();
     floor_projection_optical_frame_ =
         this->get_parameter("floor_projection_optical_frame").as_string();
-    floor_projection_surface_frame_ =
-        this->get_parameter("floor_projection_surface_frame").as_string();
+    floor_projection_reference_frame_ =
+        this->get_parameter("floor_projection_reference_frame").as_string();
     floor_projection_tf_timeout_ =
         this->get_parameter("floor_projection_tf_timeout").as_double();
+    floor_projection_tf_max_delta_ =
+        this->get_parameter("floor_projection_tf_max_delta").as_double();
+    floor_detection_config_.minimum_range = static_cast<float>(
+        this->get_parameter("floor_detection_min_range").as_double());
+    floor_detection_config_.minimum_score = static_cast<float>(
+        this->get_parameter("floor_detection_min_score").as_double());
+    floor_detection_config_.minimum_support_fraction = static_cast<float>(
+        this->get_parameter("floor_detection_min_support_fraction")
+            .as_double());
+    floor_detection_config_.persistence_range = static_cast<float>(
+        this->get_parameter("floor_detection_persistence_range").as_double());
+    floor_detection_config_.edge_window_bins = static_cast<int>(
+        this->get_parameter("floor_detection_edge_window_bins").as_int());
     input_image_layout_ =
         this->get_parameter("input_image_layout").as_string();
 
@@ -130,13 +150,19 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
           "rectified_width/height must be 0 or 2..16384 and "
           "rectified_aspect_ratio must be finite in (0, 10]");
     }
-    if (floor_projection_surface_frame_.empty() ||
+    if (floor_projection_reference_frame_.empty() ||
         !std::isfinite(floor_projection_tf_timeout_) ||
         floor_projection_tf_timeout_ < 0.0 ||
-        floor_projection_tf_timeout_ > 1.0) {
+        floor_projection_tf_timeout_ > 1.0 ||
+        !std::isfinite(floor_projection_tf_max_delta_) ||
+        floor_projection_tf_max_delta_ < 0.0 ||
+        floor_projection_tf_max_delta_ > 1.0 ||
+        !floor_detection_config_.valid()) {
       throw std::invalid_argument(
-          "floor_projection_surface_frame must be nonempty and "
-          "floor_projection_tf_timeout must be finite in [0, 1]");
+          "floor_projection_reference_frame must be nonempty, "
+          "floor_projection_tf_timeout and floor_projection_tf_max_delta must "
+          "be finite in [0, 1], and floor detection parameters must be finite "
+          "and positive");
     }
     rectified_width_ = static_cast<int>(configured_rectified_width);
     rectified_height_ = static_cast<int>(configured_rectified_height);

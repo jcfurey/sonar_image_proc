@@ -219,6 +219,56 @@ class SonarDrawer {
     float offset = 0.0f;
   };
 
+  // Image-domain floor detector. The caller supplies only the orientation of
+  // the platform-up normal in the sonar projection frame; the plane standoff
+  // is measured from the ping itself. This deliberately separates the two
+  // observables:
+  //
+  //   * pivot-head/TF geometry determines which elevation half can see down;
+  //   * the coherent floor-reverberation onset determines plane distance.
+  //
+  // persistence_range rejects thin rails, walls and electronic rings that can
+  // make a strong edge but do not remain bright through the range band swept
+  // out by the transmitted elevation aperture.
+  struct FloorDetectionConfig {
+    float minimum_range = 0.2f;
+    float maximum_range = 0.0f;  // non-positive uses the complete ping
+    float minimum_score = 0.05f;
+    float minimum_support_fraction = 0.40f;
+    float persistence_range = 0.50f;
+    int edge_window_bins = 5;
+
+    bool valid() const {
+      return std::isfinite(minimum_range) && minimum_range >= 0.0f &&
+             std::isfinite(maximum_range) &&
+             std::isfinite(minimum_score) && minimum_score >= 0.0f &&
+             std::isfinite(minimum_support_fraction) &&
+             minimum_support_fraction > 0.0f &&
+             minimum_support_fraction <= 1.0f &&
+             std::isfinite(persistence_range) && persistence_range > 0.0f &&
+             edge_window_bins >= 1;
+    }
+  };
+
+  struct FloorEstimate {
+    Plane plane;
+    float distance = 0.0f;
+    float score = 0.0f;
+    float support_fraction = 0.0f;
+    bool detected = false;
+  };
+
+  // Detect the near edge of the persistent floor-reverberation band predicted
+  // by platform_up_in_sensor and each receive beam's transmit/elevation
+  // aperture. Returned plane normal is unit length and its positive offset is
+  // the image-derived perpendicular sensor-to-floor distance. No DVL altitude
+  // or DVL surface frame participates.
+  FloorEstimate estimateFloorPlaneFromImage(
+      const AbstractSonarInterface &ping,
+      const cv::Vec3f &platform_up_in_sensor,
+      const std::vector<float> &elevationBeamwidths,
+      const FloorDetectionConfig &config) const;
+
   // Inverse-project every destination camera ray onto a measured/assumed
   // surface plane, then sample the source ping at the resulting physical
   // range and bearing. The candidate point is accepted only when its inferred

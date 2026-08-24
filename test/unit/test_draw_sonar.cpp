@@ -2,8 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -189,6 +191,202 @@ sonar_image_proc::SonarDrawer::PinholeGeometry testPinhole(
   camera.cx = 0.5f * (width - 1);
   camera.cy = 0.5f * (height - 1);
   return camera;
+}
+
+TestPing makeSyntheticFloorPing(const cv::Vec3f &platformUp,
+                                float floorDistance, float beamwidth,
+                                float floorBeamFraction = 1.0f,
+                                bool addNearRing = false) {
+  std::vector<float> ranges;
+  for (int index = 0; index <= 200; ++index)
+    ranges.push_back(0.02f * index);
+  std::vector<float> azimuths;
+  for (int index = 0; index < 65; ++index)
+    azimuths.push_back(-0.6f + 1.2f * index / 64.0f);
+
+  TestPing ping(std::move(ranges), std::move(azimuths));
+  const size_t floorBeamCount = static_cast<size_t>(std::clamp(
+      std::lround(floorBeamFraction * ping.azimuths().size()), 0L,
+      static_cast<long>(ping.azimuths().size())));
+  const size_t floorBeamBegin =
+      (ping.azimuths().size() - floorBeamCount) / 2;
+  const size_t floorBeamEnd = floorBeamBegin + floorBeamCount;
+  constexpr int kElevationSamples = 128;
+  for (size_t beam = 0; beam < ping.azimuths().size(); ++beam) {
+    float qMinimum = std::numeric_limits<float>::infinity();
+    float qMaximum = -std::numeric_limits<float>::infinity();
+    const float azimuth = ping.azimuths()[beam];
+    for (int sample = 0; sample <= kElevationSamples; ++sample) {
+      const float elevation =
+          -0.5f * beamwidth + beamwidth * sample / kElevationSamples;
+      const float cosElevation = std::cos(elevation);
+      const cv::Vec3f ray(std::sin(elevation),
+                          -cosElevation * std::sin(azimuth),
+                          cosElevation * std::cos(azimuth));
+      const float q = -platformUp.dot(ray);
+      qMinimum = std::min(qMinimum, q);
+      qMaximum = std::max(qMaximum, q);
+    }
+
+    for (size_t range = 0; range < ping.ranges().size(); ++range) {
+      const float r = ping.ranges()[range];
+      const float q = r > 0.0f ? floorDistance / r
+                               : std::numeric_limits<float>::infinity();
+      const float positiveMinimum = std::max(0.0f, qMinimum);
+      if (beam >= floorBeamBegin && beam < floorBeamEnd &&
+          q > positiveMinimum && q <= qMaximum) {
+        ping.setIntensity(range, beam, 1.0f);
+      }
+    }
+
+    // A brighter but one-bin-thick rail is a deliberate distractor. A detector
+    // that scores only the leading edge chooses this instead of the broad floor
+    // reverberation band.
+    ping.setIntensity(60, beam, 1.0f);
+
+    // The field Oculus data also carries a broad-looking near-head/range ring.
+    // It spans enough bins to fool a short persistence test, but not the 0.5 m
+    // floor-reverberation window used by the deployed detector.
+    if (addNearRing) {
+      for (size_t range = 20; range <= 28; ++range)
+        ping.setIntensity(range, beam, 1.0f);
+    }
+  }
+  return ping;
+}
+
+sonar_image_proc::SonarDrawer::PinholeGeometry aperturePinhole(
+    float azimuthHalfWidth, float elevationHalfWidth) {
+  sonar_image_proc::SonarDrawer::PinholeGeometry camera;
+  camera.width = 65;
+  camera.height = 65;
+  camera.cx = 32.0f;
+  camera.cy = 32.0f;
+  camera.fx = 32.0f / std::tan(azimuthHalfWidth);
+  camera.fy = 32.0f / std::tan(elevationHalfWidth);
+  return camera;
+}
+
+TEST(TestDrawSonar, FloorDetectorUsesPersistentReturnInsteadOfThinRail) {
+  constexpr float kBeamwidth = 20.0f * static_cast<float>(M_PI) / 180.0f;
+  constexpr float kFloorDistance = 0.50f;
+  // A level head sees the floor only through the +elevation (image-bottom)
+  // half of the transmit aperture. Projection-frame +x is down, so platform
+  // up is -x.
+  const cv::Vec3f platformUp(-1.0f, 0.0f, 0.0f);
+  const TestPing ping =
+      makeSyntheticFloorPing(platformUp, kFloorDistance, kBeamwidth);
+
+  sonar_image_proc::SonarDrawer drawer;
+  sonar_image_proc::SonarDrawer::FloorDetectionConfig config;
+  config.minimum_range = 0.2f;
+  config.minimum_score = 0.05f;
+  config.persistence_range = 0.16f;
+  config.edge_window_bins = 3;
+  const auto estimate = drawer.estimateFloorPlaneFromImage(
+      ping, platformUp, {kBeamwidth}, config);
+
+  ASSERT_TRUE(estimate.detected);
+  EXPECT_NEAR(estimate.distance, kFloorDistance, 0.02f);
+  EXPECT_GT(estimate.score, config.minimum_score);
+  EXPECT_GT(estimate.support_fraction, 0.95f);
+  EXPECT_NEAR(cv::norm(estimate.plane.normal), 1.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(estimate.plane.offset, estimate.distance);
+}
+
+TEST(TestDrawSonar, FloorDetectorRejectsShortNearFieldReverberation) {
+  constexpr float kBeamwidth = 20.0f * static_cast<float>(M_PI) / 180.0f;
+  constexpr float kFloorDistance = 0.50f;
+  const cv::Vec3f platformUp(-1.0f, 0.0f, 0.0f);
+  const TestPing ping = makeSyntheticFloorPing(
+      platformUp, kFloorDistance, kBeamwidth, 1.0f, true);
+
+  sonar_image_proc::SonarDrawer drawer;
+  sonar_image_proc::SonarDrawer::FloorDetectionConfig config;
+  config.edge_window_bins = 3;
+  const auto estimate = drawer.estimateFloorPlaneFromImage(
+      ping, platformUp, {kBeamwidth}, config);
+
+  ASSERT_TRUE(estimate.detected);
+  EXPECT_NEAR(estimate.distance, kFloorDistance, 0.02f);
+}
+
+TEST(TestDrawSonar, FloorDetectorHonorsConfiguredPartialBeamSupport) {
+  constexpr float kBeamwidth = 20.0f * static_cast<float>(M_PI) / 180.0f;
+  constexpr float kFloorDistance = 0.50f;
+  const cv::Vec3f platformUp(-1.0f, 0.0f, 0.0f);
+  const TestPing ping = makeSyntheticFloorPing(
+      platformUp, kFloorDistance, kBeamwidth, 0.55f);
+
+  sonar_image_proc::SonarDrawer drawer;
+  sonar_image_proc::SonarDrawer::FloorDetectionConfig config;
+  config.minimum_support_fraction = 0.40f;
+  config.edge_window_bins = 3;
+  const auto estimate = drawer.estimateFloorPlaneFromImage(
+      ping, platformUp, {kBeamwidth}, config);
+
+  ASSERT_TRUE(estimate.detected);
+  EXPECT_NEAR(estimate.distance, kFloorDistance, 0.02f);
+  EXPECT_GE(estimate.support_fraction, config.minimum_support_fraction);
+  EXPECT_LT(estimate.support_fraction, 0.80f);
+}
+
+TEST(TestDrawSonar, FloorDetectorRejectsWhenTiltPointsApertureAwayFromFloor) {
+  constexpr float kBeamwidth = 20.0f * static_cast<float>(M_PI) / 180.0f;
+  const TestPing ping = makeSyntheticFloorPing(
+      cv::Vec3f(-1.0f, 0.0f, 0.0f), 0.5f, kBeamwidth);
+  sonar_image_proc::SonarDrawer drawer;
+
+  // +z is platform-up in this synthetic sensor pose, so every forward ray has
+  // a negative floorward component. A bright image edge cannot override the
+  // pivot-head geometry and invent a floor behind the sonar.
+  sonar_image_proc::SonarDrawer::FloorDetectionConfig config;
+  const auto estimate = drawer.estimateFloorPlaneFromImage(
+      ping, cv::Vec3f(0.0f, 0.0f, 1.0f), {kBeamwidth}, config);
+  EXPECT_FALSE(estimate.detected);
+  EXPECT_FLOAT_EQ(estimate.support_fraction, 0.0f);
+}
+
+TEST(TestDrawSonar, HeadTiltSelectsTopOrBottomForSameFloorReturn) {
+  constexpr float kBeamwidth = 20.0f * static_cast<float>(M_PI) / 180.0f;
+  constexpr float kFloorDistance = 0.50f;
+  const cv::Vec3f bottomFacingUp(-1.0f, 0.0f, 0.0f);
+  const cv::Vec3f topFacingUp(1.0f, 0.0f, 0.0f);
+  const TestPing ping =
+      makeSyntheticFloorPing(bottomFacingUp, kFloorDistance, kBeamwidth);
+
+  sonar_image_proc::SonarDrawer drawer;
+  sonar_image_proc::SonarDrawer::FloorDetectionConfig config;
+  config.minimum_score = 0.05f;
+  config.edge_window_bins = 3;
+  const auto bottom = drawer.estimateFloorPlaneFromImage(
+      ping, bottomFacingUp, {kBeamwidth}, config);
+  // A 2-D ping cannot distinguish +/-elevation. The pivot-head orientation is
+  // what resolves the other physically valid branch, using the identical
+  // image evidence here.
+  const auto top = drawer.estimateFloorPlaneFromImage(
+      ping, topFacingUp, {kBeamwidth}, config);
+  ASSERT_TRUE(bottom.detected);
+  ASSERT_TRUE(top.detected);
+  EXPECT_NEAR(bottom.distance, top.distance, 0.01f);
+
+  cv::Mat source = drawer.drawRectSonarImage(
+      ping, sonar_image_proc::SonarColorMap(), cv::Mat(0, 0, CV_32FC1));
+  const auto camera = aperturePinhole(0.6f, 0.5f * kBeamwidth);
+  const cv::Mat bottomImage = drawer.projectOntoPlaneImage(
+      ping, source, camera, sonarFromOptical(), bottom.plane, {kBeamwidth});
+  const cv::Mat topImage = drawer.projectOntoPlaneImage(
+      ping, source, camera, sonarFromOptical(), top.plane, {kBeamwidth});
+  ASSERT_FALSE(bottomImage.empty());
+  ASSERT_FALSE(topImage.empty());
+
+  const cv::Rect upper(0, 0, camera.width, camera.height / 2);
+  const cv::Rect lower(0, camera.height / 2 + 1, camera.width,
+                       camera.height / 2);
+  EXPECT_FLOAT_EQ(static_cast<float>(cv::sum(bottomImage(upper))[0]), 0.0f);
+  EXPECT_GT(cv::sum(bottomImage(lower))[0], 1.0);
+  EXPECT_GT(cv::sum(topImage(upper))[0], 1.0);
+  EXPECT_FLOAT_EQ(static_cast<float>(cv::sum(topImage(lower))[0]), 0.0f);
 }
 
 TEST(TestDrawSonar, PlaneProjectionPlacesSurfaceOnEitherSideOfHorizon) {
