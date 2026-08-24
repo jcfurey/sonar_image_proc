@@ -70,17 +70,26 @@ pixels to range and bearing.
   elevation. Consequently it must not be advertised as `CameraInfo` or overlaid
   pixel-for-pixel on a camera frame without a separate 3D/elevation policy.
 
-* `drawn_sonar_floor_projected` supplies that elevation policy for a measured
-surface. It is an ideal virtual pinhole image in the configured sonar optical
-frame; `floor_projection_sensor_frame` identifies the sonar projection frame
-in which the ping's range/bearing convention is expressed. For every output
-pixel, the node intersects its camera ray with
-`sea_floor_estimate` at the ping timestamp, checks that the inferred elevation
-is inside the ping's transmitted vertical aperture, and samples the original
-processed raster at the resulting physical range and bearing. This removes the
-slant-range bowing that remains in `drawn_sonar_rectified`; live TF/head pitch
-naturally moves the floor above or below the optical horizon. Pixels whose rays
-cannot meet the measured plane through the sonar aperture remain black.
+* `drawn_sonar_floor_projected` supplies a floor-specific elevation policy. It
+is an ideal virtual pinhole image in the configured sonar optical frame;
+`floor_projection_sensor_frame` identifies the sonar projection frame in which
+the ping's range/bearing convention is expressed. The plane standoff is fitted
+from the coherent floor-return onset in that same ping. The detector requires
+the return to remain bright through the range band predicted by the measured
+transmit aperture, so a thin rail, wall edge, or electronic range ring cannot
+win merely by making a sharp line. No DVL altitude or DVL surface frame enters
+this product.
+
+  `floor_projection_reference_frame` contributes orientation only: its +z axis
+is transformed through the live pivot-head TF into the sonar projection frame.
+This resolves the 2-D sonar's otherwise ambiguous elevation branch, including
+the cases where floor returns belong above rather than below boresight. For
+every output pixel, the node intersects its camera ray with the detected plane,
+checks that the inferred elevation is inside the transmitted aperture, and
+samples the original processed raster at the resulting physical range and
+bearing. Pixels whose rays cannot meet the floor through that aperture remain
+black. If the aperture points away from the floor or no coherent return is
+detected, the node publishes no floor image instead of fabricating one.
 
   The horizontal intrinsics span the reported bearing limits and the vertical
 intrinsics enclose the ping's measured transmit/elevation aperture at every
@@ -93,10 +102,10 @@ a thin strip.
 
   `floor_projected_camera_info` is valid `sensor_msgs/CameraInfo` for this
 ideal virtual camera. The topic name is deliberately surface-specific: the
-projection assumes the return lies on the supplied floor plane and must not be
-treated as recovered obstacle relief. An image-derived or multi-view elevation
-estimator can supply a more general surface model later without changing the
-pinhole projection itself.
+projection assumes the return lies on the detected floor plane and must not be
+treated as recovered obstacle relief. A multi-view elevation estimator can
+supply a more general surface model later without changing the pinhole
+projection itself.
 
 * `fan_info` (`sonar_image_proc/FanImageInfo`) carries the exact per-ping
 orthographic geometry of `drawn_sonar` and `drawn_sonar_clean`: dimensions,

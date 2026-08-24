@@ -118,7 +118,7 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 - `drawn_sonar_polar` (sensor_msgs/Image): Rotated range×bearing inspection image; not camera-rectified
 - `drawn_sonar_rectified` (sensor_msgs/Image): Rectilinear, forward-facing range×bearing image (far up, near down); native-height 16:9 by default
 - `rectified_info` (sonar_image_proc/RectifiedImageInfo): Exact pixel↔range/bearing mapping for `drawn_sonar_rectified`
-- `drawn_sonar_floor_projected` (sensor_msgs/Image): True virtual-pinhole view obtained from the stamped floor plane and live head TF; invalid/out-of-aperture pixels are black
+- `drawn_sonar_floor_projected` (sensor_msgs/Image): Virtual-pinhole view anchored by the persistent floor return in the ping and oriented by live pivot-head TF; invalid/out-of-aperture pixels are black
 - `floor_projected_camera_info` (sensor_msgs/CameraInfo): Ideal pinhole geometry for `drawn_sonar_floor_projected`
 - `fan_info` (sonar_image_proc/FanImageInfo): Per-ping orthographic fan geometry
 - `drawn_sonar_rect` / `camera_info`: Deprecated migration aliases
@@ -140,8 +140,14 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 - `rectified_aspect_ratio`: Width/height used when `rectified_width` is `0` (default `16/9`)
 - `floor_projection_sensor_frame`: Sonar projection frame used by the ping geometry (empty uses the ping header)
 - `floor_projection_optical_frame`: Optical output frame (empty derives it from a `*/projection_frame` ping frame)
-- `floor_projection_surface_frame`: TF frame whose XY plane is projected (default `sea_floor_estimate`)
+- `floor_projection_reference_frame`: TF frame whose +z axis defines platform up (default `base_link`); translation is ignored and floor standoff comes from the ping
 - `floor_projection_tf_timeout`: Maximum stamped TF lookup wait in seconds
+- `floor_projection_tf_max_delta`: Maximum timestamp skew for a latest-TF orientation fallback after exact lookup fails (default 0.02 s; 0 disables fallback)
+- `floor_detection_min_range`: Ignore nearer return onsets (default 0.2 m)
+- `floor_detection_min_score`: Required robust floor-band contrast (default 0.05)
+- `floor_detection_min_support_fraction`: Fraction of receive beams that must agree (default 0.40)
+- `floor_detection_persistence_range`: Range span that must remain floor-bright after the onset (default 0.50 m)
+- `floor_detection_edge_window_bins`: Native range bins on either side of the onset edge (default 5)
 
 The floor-projected `CameraInfo` spans the ping's bearing limits horizontally
 and encloses its transmitted elevation aperture at every bearing. `fx` and

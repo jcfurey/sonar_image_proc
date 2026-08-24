@@ -36,19 +36,24 @@
     rectified_height: 0
     rectified_aspect_ratio: 1.7777777777777777
 
-    # Perspective view obtained by intersecting virtual-camera rays with the
-    # stamped surface plane, then sampling the ping at that physical
-    # range/bearing. Empty sensor frame uses the ping header; empty optical
-    # frame derives */optical_frame from that projection frame. The output is
-    # intentionally named
-    # drawn_sonar_floor_projected: this model is valid for the plane, not for
-    # arbitrary relief or obstacles above it. Its vertical intrinsics span the
-    # ping's transmitted elevation aperture; fx and fy therefore normally
-    # differ for the wide, vertically narrow Oculus fan.
+    # Perspective floor view. The coherent, persistent floor-return onset in
+    # the ping supplies plane standoff; reference-frame +z transformed through
+    # the live pivot head supplies the platform-up normal and selects the
+    # top/bottom elevation branch. No DVL altitude or DVL floor frame is used.
+    # Empty sensor frame uses the ping header; empty optical frame derives
+    # */optical_frame from it. This is valid for the detected floor, not for
+    # arbitrary relief or obstacles above it. Vertical intrinsics span the
+    # measured transmit aperture, so fx and fy normally differ.
     floor_projection_sensor_frame: ""
     floor_projection_optical_frame: ""
-    floor_projection_surface_frame: "sea_floor_estimate"
+    floor_projection_reference_frame: "base_link"
     floor_projection_tf_timeout: 0.05
+    floor_projection_tf_max_delta: 0.02
+    floor_detection_min_range: 0.2
+    floor_detection_min_score: 0.05
+    floor_detection_min_support_fraction: 0.40
+    floor_detection_persistence_range: 0.50
+    floor_detection_edge_window_bins: 5
 
     # Payload layout of the subscribed SonarImageData: beam_major is the
     # standards-compliant order current drivers emit; range_major matches

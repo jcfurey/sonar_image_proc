@@ -15,6 +15,8 @@
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2/exceptions.hpp>
 
+#include "sonar_image_proc/sonar_image_msg_interface.h"
+
 namespace draw_sonar {
 
 namespace {
@@ -219,37 +221,99 @@ void DrawSonarComponent::publishFloorProjectedProducts(
     return;
   }
 
-  std_msgs::msg::Header output_header = msg->header;
-  output_header.frame_id = optical_frame;
-  floor_projected_info_pub_->publish(makePinholeInfo(output_header, camera));
-  if (!image_wanted) return;
-
   try {
     const rclcpp::Time stamp(msg->header.stamp);
     const auto timeout =
         rclcpp::Duration::from_seconds(floor_projection_tf_timeout_);
     const auto sensor_from_camera_msg = tf_buffer_->lookupTransform(
         projection_frame, optical_frame, stamp, timeout);
-    const auto sensor_from_surface_msg = tf_buffer_->lookupTransform(
-        projection_frame, floor_projection_surface_frame_, stamp, timeout);
+    geometry_msgs::msg::TransformStamped sensor_from_reference_msg;
+    try {
+      sensor_from_reference_msg = tf_buffer_->lookupTransform(
+          projection_frame, floor_projection_reference_frame_, stamp, timeout);
+    } catch (const tf2::TransformException &exact_error) {
+      try {
+        sensor_from_reference_msg = tf_buffer_->lookupTransform(
+            projection_frame, floor_projection_reference_frame_,
+            tf2::TimePointZero);
+      } catch (const tf2::TransformException &latest_error) {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "No ping-time or latest floor-orientation TF %s <- %s (%s; "
+            "latest: %s)",
+            projection_frame.c_str(),
+            floor_projection_reference_frame_.c_str(), exact_error.what(),
+            latest_error.what());
+        return;
+      }
+
+      const rclcpp::Time latest_stamp(sensor_from_reference_msg.header.stamp);
+      const bool timeless = latest_stamp.nanoseconds() == 0;
+      const double delta =
+          timeless ? 0.0 : std::fabs((stamp - latest_stamp).seconds());
+      if (!timeless &&
+          (!(floor_projection_tf_max_delta_ > 0.0) ||
+           delta > floor_projection_tf_max_delta_)) {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "No usable ping-time floor-orientation TF %s <- %s (%s); latest "
+            "differs by %.3f ms (limit %.3f ms)",
+            projection_frame.c_str(),
+            floor_projection_reference_frame_.c_str(), exact_error.what(),
+            delta * 1000.0, floor_projection_tf_max_delta_ * 1000.0);
+        return;
+      }
+      RCLCPP_DEBUG_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Using latest %s <- %s TF for floor orientation (stamp skew %.3f "
+          "ms)",
+          projection_frame.c_str(),
+          floor_projection_reference_frame_.c_str(), delta * 1000.0);
+    }
 
     sonar_image_proc::SonarDrawer::RigidTransform sensor_from_camera;
-    sonar_image_proc::SonarDrawer::RigidTransform sensor_from_surface;
+    sonar_image_proc::SonarDrawer::RigidTransform sensor_from_reference;
     if (!rigidTransformFromMsg(sensor_from_camera_msg.transform,
                                sensor_from_camera) ||
-        !rigidTransformFromMsg(sensor_from_surface_msg.transform,
-                               sensor_from_surface)) {
+        !rigidTransformFromMsg(sensor_from_reference_msg.transform,
+                               sensor_from_reference)) {
       throw std::runtime_error("TF contains non-finite geometry");
     }
 
-    sonar_image_proc::SonarDrawer::Plane floor_plane;
-    floor_plane.normal =
-        sensor_from_surface.rotation * cv::Vec3f(0.0f, 0.0f, 1.0f);
-    floor_plane.offset =
-        -floor_plane.normal.dot(sensor_from_surface.translation);
+    // The reference frame contributes orientation only. Its +z axis is the
+    // platform-up normal, transformed through the live pivot-head TF. Plane
+    // translation comes from the sonar return itself, never from a DVL frame.
+    const cv::Vec3f platform_up_in_sensor =
+        sensor_from_reference.rotation * cv::Vec3f(0.0f, 0.0f, 1.0f);
+    sonar_image_proc::SonarImageMsgInterface raw_interface(msg);
+    auto detection_config = floor_detection_config_;
+    detection_config.maximum_range =
+        sonar_drawer_.effectiveMaxRange(raw_interface);
+    const auto floor = sonar_drawer_.estimateFloorPlaneFromImage(
+        raw_interface, platform_up_in_sensor, msg->ping_info.tx_beamwidths,
+        detection_config);
+    if (!floor.detected) {
+      RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "No coherent image-derived floor return (best candidate %.3f m, "
+          "score %.3f, support %.0f%%) using platform reference '%s'; not "
+          "publishing a floor projection",
+          floor.distance, floor.score, 100.0 * floor.support_fraction,
+          floor_projection_reference_frame_.c_str());
+      return;
+    }
+
+    std_msgs::msg::Header output_header = msg->header;
+    output_header.frame_id = optical_frame;
+    floor_projected_info_pub_->publish(makePinholeInfo(output_header, camera));
+    RCLCPP_DEBUG(this->get_logger(),
+                 "Image-derived floor: %.3f m, score %.3f, support %.0f%%",
+                 floor.distance, floor.score,
+                 100.0 * floor.support_fraction);
+    if (!image_wanted) return;
 
     const cv::Mat floor_projected = sonar_drawer_.projectOntoPlaneImage(
-        interface, range_bearing_image, camera, sensor_from_camera, floor_plane,
+        interface, range_bearing_image, camera, sensor_from_camera, floor.plane,
         msg->ping_info.tx_beamwidths);
     if (floor_projected.empty()) {
       RCLCPP_ERROR_THROTTLE(

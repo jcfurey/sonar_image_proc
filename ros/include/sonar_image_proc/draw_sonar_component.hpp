@@ -65,8 +65,8 @@ class DrawSonarComponent : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rectified_pub_;
   rclcpp::Publisher<sonar_image_proc::msg::RectifiedImageInfo>::SharedPtr
       rectified_info_pub_;
-  // Perspective virtual-camera view of the ping projected onto the stamped
-  // sea-floor plane. Its vertical placement comes from TF/head pitch.
+  // Perspective virtual-camera view of the image-derived floor return. TF
+  // supplies platform/pivot-head orientation; the ping supplies standoff.
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr floor_projected_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr
       floor_projected_info_pub_;
@@ -89,8 +89,10 @@ class DrawSonarComponent : public rclcpp::Node {
   float rectified_aspect_ratio_{16.0f / 9.0f};
   std::string floor_projection_sensor_frame_;
   std::string floor_projection_optical_frame_;
-  std::string floor_projection_surface_frame_{"sea_floor_estimate"};
+  std::string floor_projection_reference_frame_{"base_link"};
   double floor_projection_tf_timeout_{0.05};
+  double floor_projection_tf_max_delta_{0.02};
+  sonar_image_proc::SonarDrawer::FloorDetectionConfig floor_detection_config_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

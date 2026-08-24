@@ -29,19 +29,32 @@ ProjectedSonarImage makePing() {
   ping.header.stamp.sec = 42;
   ping.header.stamp.nanosec = 123456789;
   ping.header.frame_id = "sonar_projection_frame";
-  ping.ranges = {1.0F, 2.0F, 3.0F};
-  for (const double azimuth : {-0.5, 0.0, 0.5}) {
-    geometry_msgs::msg::Vector3 beam;
-    beam.x = 0.0;
-    beam.y = -std::sin(azimuth);
-    beam.z = std::cos(azimuth);
-    ping.beam_directions.push_back(beam);
+  for (int range = 1; range <= 161; ++range)
+    ping.ranges.push_back(0.02F * range);
+  for (int beam = 0; beam < 33; ++beam) {
+    const double azimuth = -0.5 + beam / 32.0;
+    geometry_msgs::msg::Vector3 direction;
+    direction.x = 0.0;
+    direction.y = -std::sin(azimuth);
+    direction.z = std::cos(azimuth);
+    ping.beam_directions.push_back(direction);
   }
   ping.image.dtype = SonarImageData::DTYPE_UINT8;
-  ping.image.beam_count = 3;
-  ping.image.data = {10, 20, 30, 40, 50, 60, 70, 80, 90};
-  ping.ping_info.tx_beamwidths.assign(3, 1.0F);
-  ping.ping_info.rx_beamwidths.assign(3, 0.1F);
+  ping.image.beam_count = ping.beam_directions.size();
+  // Current ProjectedSonarImage wire order is beam-major. A level head has
+  // platform up along projection -x, so a 1-rad transmit aperture first sees
+  // a floor 0.40 m below the sonar at r=0.40/sin(0.5)=0.83 m. Paint the broad
+  // persistent return that the production detector expects, plus one thin
+  // nearer ring it must reject.
+  for (size_t beam = 0; beam < ping.beam_directions.size(); ++beam) {
+    for (const float range : ping.ranges) {
+      uint8_t intensity = range >= 0.40F / std::sin(0.5F) ? 220 : 10;
+      if (std::abs(range - 0.50F) < 0.005F) intensity = 255;
+      ping.image.data.push_back(intensity);
+    }
+  }
+  ping.ping_info.tx_beamwidths.assign(ping.beam_directions.size(), 1.0F);
+  ping.ping_info.rx_beamwidths.assign(ping.beam_directions.size(), 0.1F);
   return ping;
 }
 
@@ -57,6 +70,7 @@ TEST(FanInfoContract, PublishesTruthfulFanAndRectifiedGeometry) {
       rclcpp::Parameter("rectified_height", 5),
       rclcpp::Parameter("floor_projection_optical_frame",
                         "sonar_optical_frame"),
+      rclcpp::Parameter("floor_projection_reference_frame", "base_link"),
   });
 
   auto drawer = std::make_shared<draw_sonar::DrawSonarComponent>(options);
@@ -123,13 +137,15 @@ TEST(FanInfoContract, PublishesTruthfulFanAndRectifiedGeometry) {
   projection_from_optical.child_frame_id = "sonar_optical_frame";
   projection_from_optical.transform.rotation.z = -std::sqrt(0.5);
   projection_from_optical.transform.rotation.w = std::sqrt(0.5);
-  geometry_msgs::msg::TransformStamped projection_from_floor;
-  projection_from_floor.header = projection_from_optical.header;
-  projection_from_floor.child_frame_id = "sea_floor_estimate";
-  projection_from_floor.transform.translation.x = 1.0;
-  projection_from_floor.transform.rotation.y = std::sqrt(0.5);
-  projection_from_floor.transform.rotation.w = std::sqrt(0.5);
-  static_tf.sendTransform({projection_from_optical, projection_from_floor});
+  geometry_msgs::msg::TransformStamped projection_from_base;
+  projection_from_base.header = projection_from_optical.header;
+  projection_from_base.child_frame_id = "base_link";
+  // base +z (platform up) -> projection -x for a level head. This is the
+  // orientation half of the floor estimate; its translation is deliberately
+  // irrelevant because standoff comes from the ping.
+  projection_from_base.transform.rotation.y = -std::sqrt(0.5);
+  projection_from_base.transform.rotation.w = std::sqrt(0.5);
+  static_tf.sendTransform({projection_from_optical, projection_from_base});
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(drawer);
@@ -159,8 +175,8 @@ TEST(FanInfoContract, PublishesTruthfulFanAndRectifiedGeometry) {
   EXPECT_DOUBLE_EQ(fan_info->origin_v,
                    static_cast<double>(fan_info->height));
   EXPECT_GT(fan_info->pixels_per_meter, 0.0);
-  EXPECT_DOUBLE_EQ(fan_info->min_range, 1.0);
-  EXPECT_DOUBLE_EQ(fan_info->max_range, 3.0);
+  EXPECT_NEAR(fan_info->min_range, 0.02, 1e-6);
+  EXPECT_NEAR(fan_info->max_range, 3.22, 1e-6);
   EXPECT_LT(fan_info->min_bearing, 0.0);
   EXPECT_GT(fan_info->max_bearing, 0.0);
   EXPECT_EQ(polar_image->height, ping.ranges.size());
@@ -170,9 +186,9 @@ TEST(FanInfoContract, PublishesTruthfulFanAndRectifiedGeometry) {
   EXPECT_EQ(rectified_image->height, 5U);
   EXPECT_EQ(rectified_image->width, rectified_info->width);
   EXPECT_EQ(rectified_image->height, rectified_info->height);
-  EXPECT_DOUBLE_EQ(rectified_info->min_range, 1.0);
-  EXPECT_DOUBLE_EQ(rectified_info->max_range, 3.0);
-  EXPECT_DOUBLE_EQ(rectified_info->meters_per_row, 0.5);
+  EXPECT_NEAR(rectified_info->min_range, 0.02, 1e-6);
+  EXPECT_NEAR(rectified_info->max_range, 3.22, 1e-6);
+  EXPECT_NEAR(rectified_info->meters_per_row, 0.8, 1e-6);
   EXPECT_NEAR(rectified_info->principal_point_u, 3.0, 1e-6);
   EXPECT_NEAR(
       std::atan((0.0 - rectified_info->principal_point_u) /
