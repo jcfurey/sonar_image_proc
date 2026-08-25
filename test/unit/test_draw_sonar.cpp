@@ -24,6 +24,10 @@ TEST(TestDrawSonar, DecodesStandardBeamMajorPayload) {
   ASSERT_TRUE(sonar_image_proc::beamMajorToRangeMajor(
       beam_major, 3, 2, 2, range_major));
   EXPECT_EQ(range_major, expected_range_major);
+  std::vector<std::uint8_t> round_trip;
+  ASSERT_TRUE(sonar_image_proc::rangeMajorToBeamMajor(
+      range_major, 3, 2, 2, round_trip));
+  EXPECT_EQ(round_trip, beam_major);
   EXPECT_FALSE(sonar_image_proc::beamMajorToRangeMajor(
       beam_major, 4, 2, 2, range_major));
 }
@@ -328,6 +332,7 @@ TEST(TestDrawSonar, FloorDetectorHonorsConfiguredPartialBeamSupport) {
   ASSERT_TRUE(estimate.detected);
   EXPECT_NEAR(estimate.distance, kFloorDistance, 0.02f);
   EXPECT_GE(estimate.support_fraction, config.minimum_support_fraction);
+  EXPECT_GT(estimate.support_fraction, 0.50f);
   EXPECT_LT(estimate.support_fraction, 0.80f);
 }
 

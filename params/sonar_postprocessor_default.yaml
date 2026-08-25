@@ -1,6 +1,9 @@
 /**:
   ros__parameters:
     # Postprocessing parameters for sonar_postprocessor node
+    # Current messages are beam-major. Set range_major only for historical
+    # recordings; the output topic is always canonical beam-major.
+    input_image_layout: beam_major
     
     # Gain multiplier for intensity values
     # Values > 1.0 brighten the image, < 1.0 darken it

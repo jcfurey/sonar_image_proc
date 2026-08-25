@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include "rclcpp/rclcpp.hpp"
 #include "marine_acoustic_msgs/msg/projected_sonar_image.hpp"
 
@@ -23,6 +24,7 @@ class SonarPostprocessorComponent : public rclcpp::Node {
   rclcpp::Publisher<marine_acoustic_msgs::msg::ProjectedSonarImage>::SharedPtr pub_sonar_image_;
 
   float gain_, gamma_;
+  std::string input_image_layout_;
 };
 
 }  // namespace sonar_postprocessor
