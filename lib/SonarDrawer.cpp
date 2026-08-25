@@ -850,11 +850,6 @@ SonarDrawer::FloorEstimate SonarDrawer::estimateFloorPlaneFromImage(
     if (static_cast<int>(beamScores.size()) < minimumSupport) continue;
     const float geometricSupport =
         static_cast<float>(beamScores.size()) / beamCount;
-    const int positiveBeams = static_cast<int>(std::count_if(
-        beamScores.begin(), beamScores.end(),
-        [](float value) { return value > 0.0f; }));
-    const float evidenceSupport =
-        static_cast<float>(positiveBeams) / beamCount;
 
     // Score the weakest member of the best `minimumSupport` beams. This makes
     // the configured support fraction mean what it says. The old fixed 20th
@@ -865,6 +860,22 @@ SonarDrawer::FloorEstimate SonarDrawer::estimateFloorPlaneFromImage(
         beamScores.begin() + (beamScores.size() - minimumSupport);
     std::nth_element(beamScores.begin(), supportRank, beamScores.end());
     const float robustContrast = *supportRank;
+    // Agreement must mean support for this robust hypothesis, not merely a
+    // value infinitesimally above zero. Thin rails and numerical interpolation
+    // produce weak positive contrast in otherwise empty beams; counting those
+    // made a 55%-wide floor report 92% support and defeated the configured
+    // coherence gate. A quarter of the robust rank admits the weaker shoulders
+    // of the same coherent lobe without counting those near-zero distractors.
+    constexpr float kSupportContrastFraction = 0.25f;
+    const float supportContrast =
+        robustContrast * kSupportContrastFraction;
+    const int supportingBeams = robustContrast > 0.0f ?
+        static_cast<int>(std::count_if(
+            beamScores.begin(), beamScores.end(),
+            [supportContrast](float value) { return value >= supportContrast; })) :
+        0;
+    const float evidenceSupport =
+        static_cast<float>(supportingBeams) / beamCount;
     const float score = robustContrast * std::sqrt(geometricSupport);
     if (std::isfinite(score) && score > bestScore) {
       bestScore = score;

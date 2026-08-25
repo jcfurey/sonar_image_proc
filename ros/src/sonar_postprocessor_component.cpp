@@ -4,6 +4,7 @@
 
 #include "sonar_image_proc/sonar_postprocessor_component.hpp"
 
+#include "sonar_image_proc/ImageLayout.h"
 #include "sonar_image_proc/sonar_image_msg_interface.h"
 
 namespace sonar_postprocessor {
@@ -16,9 +17,17 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
     // Declare and get parameters
     this->declare_parameter("gain", 1.0);
     this->declare_parameter("gamma", 0.0);
+    this->declare_parameter("input_image_layout", "beam_major");
 
     gain_ = this->get_parameter("gain").as_double();
     gamma_ = this->get_parameter("gamma").as_double();
+    input_image_layout_ =
+        this->get_parameter("input_image_layout").as_string();
+    if (input_image_layout_ != "beam_major" &&
+        input_image_layout_ != "range_major") {
+      throw std::invalid_argument(
+          "input_image_layout must be beam_major or range_major");
+    }
 
     sub_sonar_image_ = this->create_subscription<ProjectedSonarImage>(
         "sonar_image", rclcpp::SensorDataQoS(),
@@ -33,37 +42,71 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
 
   void SonarPostprocessorComponent::sonarImageCallback(
       const marine_acoustic_msgs::msg::ProjectedSonarImage::SharedPtr msg) {
-    SonarImageMsgInterface interface(msg);
-
-    // For now, only postprocess 32bit images
-    if (msg->image.dtype != msg->image.DTYPE_UINT32) {
-      pub_sonar_image_->publish(*msg);
+    const std::size_t n_ranges = msg->ranges.size();
+    const std::size_t n_beams = msg->beam_directions.size();
+    if (msg->image.beam_count != 0 && msg->image.beam_count != n_beams) {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Dropping sonar image: image.beam_count %u != %zu beam_directions",
+          msg->image.beam_count, n_beams);
+      return;
+    }
+    std::size_t bytes_per_cell = 0;
+    if (msg->image.dtype == msg->image.DTYPE_UINT8) bytes_per_cell = 1;
+    else if (msg->image.dtype == msg->image.DTYPE_UINT16) bytes_per_cell = 2;
+    else if (msg->image.dtype == msg->image.DTYPE_UINT32) bytes_per_cell = 4;
+    if (n_ranges == 0 || n_beams == 0 || bytes_per_cell == 0 ||
+        n_ranges > msg->image.data.max_size() / n_beams ||
+        n_ranges * n_beams >
+            msg->image.data.max_size() / bytes_per_cell ||
+        msg->image.data.size() != n_ranges * n_beams * bytes_per_cell) {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "Dropping malformed or unsupported sonar image (%zu ranges x %zu "
+          "beams, dtype %u, %zu bytes)",
+          n_ranges, n_beams, msg->image.dtype, msg->image.data.size());
       return;
     }
 
-    // Validate the data buffer covers ranges*azimuths*4 bytes before the
-    // intensity_uint32() reads below (mirror of draw_sonar_component's guard):
-    // a short/malformed UINT32 buffer is otherwise read out of bounds.
-    {
-      const size_t need = static_cast<size_t>(interface.nRanges()) *
-                          static_cast<size_t>(interface.nAzimuth()) * 4;
-      if (msg->image.data.size() < need) {
-        RCLCPP_ERROR_THROTTLE(
-            this->get_logger(), *this->get_clock(), 5000,
-            "Dropping sonar image: %zu data bytes < %zu required",
-            msg->image.data.size(), need);
-        return;
-      }
+    // The inherited message interface is range-major. Canonicalize into that
+    // private working order once, then always publish the standards-facing
+    // output as beam-major.
+    auto working = std::make_shared<ProjectedSonarImage>(*msg);
+    working->image.beam_count = static_cast<std::uint32_t>(n_beams);
+    if (input_image_layout_ == "beam_major" &&
+        !sonar_image_proc::beamMajorToRangeMajor(
+            msg->image.data, n_ranges, n_beams, bytes_per_cell,
+            working->image.data)) {
+      RCLCPP_ERROR(this->get_logger(),
+                   "Could not canonicalize beam-major sonar image");
+      return;
     }
+    SonarImageMsgInterface interface(working);
 
     // Expect this will copy
     marine_acoustic_msgs::msg::ProjectedSonarImage out = *msg;
+    out.image.beam_count = static_cast<std::uint32_t>(n_beams);
+
+    // Only UINT32 needs radiometric conversion. Still canonicalize every other
+    // supported input so the output topic has one unambiguous wire contract.
+    if (msg->image.dtype != msg->image.DTYPE_UINT32) {
+      if (!sonar_image_proc::rangeMajorToBeamMajor(
+              working->image.data, n_ranges, n_beams, bytes_per_cell,
+              out.image.data)) {
+        RCLCPP_ERROR(this->get_logger(),
+                     "Could not publish beam-major sonar image");
+        return;
+      }
+      pub_sonar_image_->publish(out);
+      return;
+    }
 
     // For now, only 8-bit output is supported
     out.image.dtype = out.image.DTYPE_UINT8;
-    out.image.data.clear();
-    out.image.data.reserve(interface.ranges().size() *
-                           interface.azimuths().size());
+    out.image.is_bigendian = false;
+    std::vector<std::uint8_t> range_major_output;
+    range_major_output.reserve(interface.ranges().size() *
+                               interface.azimuths().size());
 
     for (int r_idx = 0; r_idx < interface.nRanges(); ++r_idx) {
       for (int a_idx = 0; a_idx < interface.nAzimuth(); ++a_idx) {
@@ -82,8 +125,15 @@ SonarPostprocessorComponent::SonarPostprocessorComponent(const rclcpp::NodeOptio
           v = pow(v, gamma_);
         }
 
-        out.image.data.push_back(UINT8_MAX * v);
+        range_major_output.push_back(UINT8_MAX * v);
       }
+    }
+
+    if (!sonar_image_proc::rangeMajorToBeamMajor(
+            range_major_output, n_ranges, n_beams, 1, out.image.data)) {
+      RCLCPP_ERROR(this->get_logger(),
+                   "Could not publish processed beam-major sonar image");
+      return;
     }
 
     pub_sonar_image_->publish(out);

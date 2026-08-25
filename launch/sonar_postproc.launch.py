@@ -79,6 +79,11 @@ def generate_launch_description():
         default_value='0.0',
         description='Gamma correction for postprocessor (0.0 = no correction)'
     )
+    input_image_layout_arg = DeclareLaunchArgument(
+        'input_image_layout',
+        default_value='beam_major',
+        description='Input sample order: beam_major or legacy range_major',
+    )
 
     # Get launch configurations
     namespace = LaunchConfiguration('namespace')
@@ -90,6 +95,7 @@ def generate_launch_description():
     log_scale = LaunchConfiguration('log_scale')
     gain = LaunchConfiguration('gain')
     gamma = LaunchConfiguration('gamma')
+    input_image_layout = LaunchConfiguration('input_image_layout')
 
     # Build the actions only after launch substitutions have a live context.
     def launch_setup(context):
@@ -117,7 +123,9 @@ def generate_launch_description():
             plugin='draw_sonar::DrawSonarComponent',
             name='draw_sonar',
             namespace='oculus',
-            parameters=draw_sonar_params,
+            parameters=draw_sonar_params + [{
+                'input_image_layout': input_image_layout,
+            }],
             remappings=[
                 ('sonar_image', '/oculus/sonar_image'),
             ],
@@ -131,6 +139,7 @@ def generate_launch_description():
             parameters=[{
                 'gain': gain,
                 'gamma': gamma,
+                'input_image_layout': input_image_layout,
                 'use_sim_time': use_sim_time,
             }],
             remappings=[
@@ -144,7 +153,9 @@ def generate_launch_description():
             plugin='draw_sonar::DrawSonarComponent',
             name='draw_sonar',
             namespace='postprocess',
-            parameters=draw_sonar_params,
+            parameters=draw_sonar_params + [{
+                'input_image_layout': 'beam_major',
+            }],
             remappings=[
                 ('sonar_image', '/postprocess/sonar_image'),
             ],
@@ -169,7 +180,9 @@ def generate_launch_description():
             executable='draw_sonar_node',
             name='draw_sonar',
             namespace='oculus',
-            parameters=draw_sonar_params,
+            parameters=draw_sonar_params + [{
+                'input_image_layout': input_image_layout,
+            }],
             remappings=[
                 ('sonar_image', '/oculus/sonar_image'),
             ],
@@ -185,6 +198,7 @@ def generate_launch_description():
             parameters=[{
                 'gain': gain,
                 'gamma': gamma,
+                'input_image_layout': input_image_layout,
                 'use_sim_time': use_sim_time,
             }],
             remappings=[
@@ -200,7 +214,9 @@ def generate_launch_description():
             executable='draw_sonar_node',
             name='draw_sonar',
             namespace='postprocess',
-            parameters=draw_sonar_params,
+            parameters=draw_sonar_params + [{
+                'input_image_layout': 'beam_major',
+            }],
             remappings=[
                 ('sonar_image', '/postprocess/sonar_image'),
             ],
@@ -226,5 +242,6 @@ def generate_launch_description():
         log_scale_arg,
         gain_arg,
         gamma_arg,
+        input_image_layout_arg,
         OpaqueFunction(function=launch_setup),
     ])

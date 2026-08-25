@@ -8,6 +8,7 @@
 #include <rosbag2_cpp/writers/sequential_writer.hpp>
 #include <rosbag2_storage/storage_options.hpp>
 #include <sonar_image_proc/sonar_image_msg_interface.h>
+#include <sonar_image_proc/ImageLayout.h>
 
 #include <boost/program_options.hpp>
 #include <opencv2/core.hpp>
@@ -103,6 +104,7 @@ int main(int argc, char **argv) {
     ("logscale,l", po::bool_switch()->default_value(true), "Do logscale")
     ("min-db", po::value<float>()->default_value(0), "Min db")
     ("max-db", po::value<float>()->default_value(0), "Max db")
+    ("input-layout", po::value<string>()->default_value("beam_major"), "Input sample order: beam_major or range_major")
     ("osd", po::bool_switch()->default_value(true), "If set, include the on-screen display in output")
     ("output-bag,o", po::value<string>(), "Name of output bagfile")
     ("output-topic,t", po::value<string>()->default_value("/drawn_sonar"), "Topic for images in output bagfile");
@@ -141,6 +143,11 @@ int main(int argc, char **argv) {
   if (vm.count("help")) {
     print_help(public_description);
   } else if (vm.count("input-files")) {
+    const std::string input_layout = vm["input-layout"].as<string>();
+    if (input_layout != "beam_major" && input_layout != "range_major") {
+      std::cerr << "input-layout must be beam_major or range_major" << std::endl;
+      return 2;
+    }
     if (vm.count("input-files") > 1) {
       std::cerr << "Can only process one file at a time" << std::endl;
       exit(-1);
@@ -192,24 +199,37 @@ int main(int argc, char **argv) {
           auto msg = std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>();
           serialization.deserialize_message(&serialized_msg, msg.get());
 
-          sonar_image_proc::SonarImageMsgInterface interface(msg);
-
-          // Validate the data buffer covers ranges*bearings*elem before drawing;
-          // a truncated/malformed ping is otherwise read out of bounds.
-          {
-            size_t elem = 0;
-            if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
-            else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
-            else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
-            const size_t need = static_cast<size_t>(interface.nRanges()) *
-                                static_cast<size_t>(interface.nBearings()) * elem;
-            if (elem == 0 || msg->image.data.size() < need) {
-              std::cerr << "Skipping malformed sonar image ("
-                        << msg->image.data.size() << " bytes < " << need
-                        << " required)" << std::endl;
+          const std::size_t ranges = msg->ranges.size();
+          const std::size_t beams = msg->beam_directions.size();
+          if (msg->image.beam_count != 0 && msg->image.beam_count != beams) {
+            std::cerr << "Skipping sonar image with inconsistent beam_count"
+                      << std::endl;
+            continue;
+          }
+          size_t elem = 0;
+          if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
+          else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
+          else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
+          if (ranges == 0 || beams == 0 || elem == 0 ||
+              ranges > msg->image.data.max_size() / beams ||
+              ranges * beams > msg->image.data.max_size() / elem ||
+              msg->image.data.size() != ranges * beams * elem) {
+            std::cerr << "Skipping malformed or unsupported sonar image"
+                      << std::endl;
+            continue;
+          }
+          if (input_layout == "beam_major") {
+            std::vector<std::uint8_t> range_major;
+            if (!sonar_image_proc::beamMajorToRangeMajor(
+                    msg->image.data, ranges, beams, elem, range_major)) {
+              std::cerr << "Skipping sonar image that cannot be canonicalized"
+                        << std::endl;
               continue;
             }
+            msg->image.data = std::move(range_major);
           }
+          msg->image.beam_count = static_cast<std::uint32_t>(beams);
+          sonar_image_proc::SonarImageMsgInterface interface(msg);
 
           if (vm["logscale"].as<bool>()) {
             interface.do_log_scale(vm["min-db"].as<float>(),

@@ -259,6 +259,17 @@ if(BUILD_TESTING)
     tf2
     tf2_ros
   )
+
+  ament_add_gtest(test_postprocessor_contract
+    test/unit/test_postprocessor_contract.cpp
+  )
+  target_include_directories(test_postprocessor_contract PRIVATE ros/include)
+  target_link_libraries(test_postprocessor_contract sonar_image_proc_components)
+  sonar_target_dependencies(test_postprocessor_contract
+    rclcpp
+    marine_acoustic_msgs
+    geometry_msgs
+  )
 endif()
 
 ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)
