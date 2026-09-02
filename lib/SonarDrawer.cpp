@@ -12,6 +12,7 @@
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/DrawSonar.h"
+#include "sonar_image_proc/CoordinateTable.h"
 #include "sonar_image_proc/OverlayImage.h"
 
 namespace sonar_image_proc {
@@ -358,6 +359,14 @@ void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
   _scMap2.release();
   cv::Mat newmap;
 
+  bool rangesAscending = false;
+  bool bearingsAscending = false;
+  if (!validateCoordinateTable(ping.ranges(), rangesAscending) ||
+      !rangesAscending ||
+      !validateCoordinateTable(ping.azimuths(), bearingsAscending)) {
+    return;
+  }
+
   const auto azimuthBounds = ping.azimuthBounds();
 
   // Calculate image dimensions based on pixels per meter scale factor
@@ -499,23 +508,6 @@ bool SonarDrawer::CachedMap::Entry::isValidFor(
 // ==== SonarDrawer::CachedRectifiedMap ====
 
 namespace {
-
-bool validateCoordinateTable(const std::vector<float> &samples,
-                             bool &ascending) {
-  if (samples.size() < 2 || !std::isfinite(samples.front()) ||
-      !std::isfinite(samples.back()) || samples.back() == samples.front()) {
-    return false;
-  }
-  ascending = samples.back() > samples.front();
-  for (size_t i = 1; i < samples.size(); ++i) {
-    if (!std::isfinite(samples[i - 1]) || !std::isfinite(samples[i]))
-      return false;
-    if (ascending ? samples[i] <= samples[i - 1]
-                  : samples[i] >= samples[i - 1])
-      return false;
-  }
-  return true;
-}
 
 // Convert a physical coordinate into a fractional sample index using an
 // already-validated, possibly non-uniform or descending coordinate table.

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "sonar_image_proc/DrawSonar.h"
+#include "sonar_image_proc/CoordinateTable.h"
 #include "sonar_image_proc/ImageLayout.h"
 
 namespace {
@@ -30,6 +31,22 @@ TEST(TestDrawSonar, DecodesStandardBeamMajorPayload) {
   EXPECT_EQ(round_trip, beam_major);
   EXPECT_FALSE(sonar_image_proc::beamMajorToRangeMajor(
       beam_major, 4, 2, 2, range_major));
+}
+
+TEST(TestDrawSonar, RejectsNonFiniteOrNonMonotonicCoordinateTables) {
+  bool ascending = false;
+  EXPECT_TRUE(sonar_image_proc::validateCoordinateTable(
+      {0.1f, 0.2f, 0.4f}, ascending));
+  EXPECT_TRUE(ascending);
+  EXPECT_TRUE(sonar_image_proc::validateCoordinateTable(
+      {0.4f, 0.2f, 0.1f}, ascending));
+  EXPECT_FALSE(ascending);
+  EXPECT_FALSE(sonar_image_proc::validateCoordinateTable(
+      {0.1f, 0.2f, 0.2f}, ascending));
+  EXPECT_FALSE(sonar_image_proc::validateCoordinateTable(
+      {0.1f, 0.3f, 0.2f}, ascending));
+  EXPECT_FALSE(sonar_image_proc::validateCoordinateTable(
+      {0.1f, std::numeric_limits<float>::quiet_NaN()}, ascending));
 }
 
 class TestPing : public sonar_image_proc::AbstractSonarInterface {

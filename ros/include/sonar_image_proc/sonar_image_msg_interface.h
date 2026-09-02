@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -198,47 +199,65 @@ struct SonarImageMsgInterface
   float _verticalTanSquared;
   std::vector<float> _ping_azimuths;
 
-  size_t index(const AzimuthRangeIndices &idx) const {
-    // _dataSize is 0 for an unrecognized dtype.  The old code left a local
-    // `int data_size` uninitialized on that path, since assert() compiles
-    // away under NDEBUG -- so a release build indexed with garbage.
-    return _dataSize * ((idx.range() * _ping_azimuths.size()) + idx.azimuth());
-  }
-
-  // True if a whole element of _dataSize bytes starting at i is in bounds.
-  bool indexInBounds(size_t i) const {
-    return (_dataSize > 0) && (i + _dataSize <= _ping->image.data.size());
+  bool checkedIndex(const AzimuthRangeIndices &idx, size_t &index) const {
+    // Validate each coordinate before doing any arithmetic. A product-only
+    // check can wrap a maliciously large index back into the payload, and
+    // i + _dataSize can wrap before the final size comparison.
+    const size_t bearings = _ping_azimuths.size();
+    if (_dataSize == 0 || bearings == 0 ||
+        idx.range() >= _ping->ranges.size() || idx.azimuth() >= bearings) {
+      return false;
+    }
+    if (idx.range() >
+        (std::numeric_limits<size_t>::max() - idx.azimuth()) / bearings) {
+      return false;
+    }
+    const size_t sample = idx.range() * bearings + idx.azimuth();
+    if (sample > std::numeric_limits<size_t>::max() / _dataSize) {
+      return false;
+    }
+    index = sample * _dataSize;
+    return index <= _ping->image.data.size() &&
+           _dataSize <= _ping->image.data.size() - index;
   }
 
   // "raw" read functions.  Assumes the data type has already been checked
   uint32_t read_uint8(const AzimuthRangeIndices &idx) const {
     assert(_ping->image.dtype == _ping->image.DTYPE_UINT8);
-    const auto i = index(idx);
-    if (!indexInBounds(i)) return 0;
+    size_t i = 0;
+    if (!checkedIndex(idx, i)) return 0;
 
     return (_ping->image.data[i]);
   }
 
   uint32_t read_uint16(const AzimuthRangeIndices &idx) const {
     assert(_ping->image.dtype == _ping->image.DTYPE_UINT16);
-    const auto i = index(idx);
-    if (!indexInBounds(i)) return 0;
+    size_t i = 0;
+    if (!checkedIndex(idx, i)) return 0;
 
-    return (static_cast<uint16_t>(_ping->image.data[i]) |
-            (static_cast<uint16_t>(_ping->image.data[i + 1]) << 8));
+    if (_ping->image.is_bigendian) {
+      return (static_cast<uint16_t>(_ping->image.data[i]) << 8) |
+             static_cast<uint16_t>(_ping->image.data[i + 1]);
+    }
+    return static_cast<uint16_t>(_ping->image.data[i]) |
+           (static_cast<uint16_t>(_ping->image.data[i + 1]) << 8);
   }
 
   uint32_t read_uint32(const AzimuthRangeIndices &idx) const {
     assert(_ping->image.dtype == _ping->image.DTYPE_UINT32);
-    const auto i = index(idx);
-    if (!indexInBounds(i)) return 0;
+    size_t i = 0;
+    if (!checkedIndex(idx, i)) return 0;
 
-    const uint32_t v =
-        (static_cast<uint32_t>(_ping->image.data[i]) |
-         (static_cast<uint32_t>(_ping->image.data[i + 1]) << 8) |
-         (static_cast<uint32_t>(_ping->image.data[i + 2]) << 16) |
-         (static_cast<uint32_t>(_ping->image.data[i + 3]) << 24));
-    return v;
+    if (_ping->image.is_bigendian) {
+      return (static_cast<uint32_t>(_ping->image.data[i]) << 24) |
+             (static_cast<uint32_t>(_ping->image.data[i + 1]) << 16) |
+             (static_cast<uint32_t>(_ping->image.data[i + 2]) << 8) |
+             static_cast<uint32_t>(_ping->image.data[i + 3]);
+    }
+    return static_cast<uint32_t>(_ping->image.data[i]) |
+           (static_cast<uint32_t>(_ping->image.data[i + 1]) << 8) |
+           (static_cast<uint32_t>(_ping->image.data[i + 2]) << 16) |
+           (static_cast<uint32_t>(_ping->image.data[i + 3]) << 24);
   }
 
   // Linear, dtype-normalised intensity in [0,1]. Split out so the log path can
