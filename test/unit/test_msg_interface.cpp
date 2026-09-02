@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -24,7 +25,8 @@ using sonar_image_proc::SonarImageMsgInterface;
 
 // One beam, N ranges, with the given raw sample values.
 ProjectedSonarImage::SharedPtr makePing(uint8_t dtype,
-                                        const std::vector<uint32_t> &samples) {
+                                        const std::vector<uint32_t> &samples,
+                                        bool big_endian = false) {
   auto ping = std::make_shared<ProjectedSonarImage>();
   ping->ranges.resize(samples.size());
   for (size_t i = 0; i < samples.size(); ++i) ping->ranges[i] = 0.1f * (i + 1);
@@ -37,14 +39,18 @@ ProjectedSonarImage::SharedPtr makePing(uint8_t dtype,
 
   ping->image.dtype = dtype;
   ping->image.beam_count = 1;
+  ping->image.is_bigendian = big_endian;
   const size_t elem = (dtype == SonarImageData::DTYPE_UINT8)    ? 1
                       : (dtype == SonarImageData::DTYPE_UINT16) ? 2
                                                                 : 4;
   ping->image.data.resize(samples.size() * elem, 0);
-  for (size_t i = 0; i < samples.size(); ++i)
-    for (size_t b = 0; b < elem; ++b)
+  for (size_t i = 0; i < samples.size(); ++i) {
+    for (size_t b = 0; b < elem; ++b) {
+      const size_t shift_byte = big_endian ? elem - b - 1 : b;
       ping->image.data[i * elem + b] =
-          static_cast<uint8_t>((samples[i] >> (8 * b)) & 0xFF);
+          static_cast<uint8_t>((samples[i] >> (8 * shift_byte)) & 0xFF);
+    }
+  }
   return ping;
 }
 
@@ -98,6 +104,9 @@ TEST(TestMsgInterface, OutOfBoundsReadsAreSilentZero) {
                 sonar_image_proc::AzimuthRangeIndices(99, 0)), 0);
   EXPECT_EQ(iface.intensity_uint32(
                 sonar_image_proc::AzimuthRangeIndices(99, 99)), 0u);
+  EXPECT_EQ(iface.intensity_uint8(sonar_image_proc::AzimuthRangeIndices(
+                std::numeric_limits<size_t>::max(),
+                std::numeric_limits<size_t>::max())), 0u);
   // in-bounds still reads through
   EXPECT_GT(iface.intensity_uint8(
                 sonar_image_proc::AzimuthRangeIndices(0, 1)), 0);
@@ -155,6 +164,22 @@ TEST(TestMsgInterface, LinearPathUnchangedWithoutLogScale) {
   const sonar_image_proc::AzimuthRangeIndices idx(0, 0);
   EXPECT_EQ(iface.intensity_uint16(idx), 0x1234);
   EXPECT_EQ(iface.intensity_uint8(idx), 0x12);  // >> 8, as before
+}
+
+TEST(TestMsgInterface, HonorsBigEndianUint16Payloads) {
+  auto ping = makePing(SonarImageData::DTYPE_UINT16, {0x1234, 0xABCD}, true);
+  SonarImageMsgInterface iface(ping);
+  EXPECT_EQ(iface.intensity_uint16(
+                sonar_image_proc::AzimuthRangeIndices(0, 0)), 0x1234);
+  EXPECT_EQ(iface.intensity_uint16(
+                sonar_image_proc::AzimuthRangeIndices(0, 1)), 0xABCD);
+}
+
+TEST(TestMsgInterface, HonorsBigEndianUint32Payloads) {
+  auto ping = makePing(SonarImageData::DTYPE_UINT32, {0x12345678U}, true);
+  SonarImageMsgInterface iface(ping);
+  EXPECT_EQ(iface.intensity_uint32(
+                sonar_image_proc::AzimuthRangeIndices(0, 0)), 0x12345678U);
 }
 
 }  // namespace

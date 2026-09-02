@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <sstream>
 
 #include <cv_bridge/cv_bridge.hpp>
@@ -15,6 +16,7 @@
 #include <opencv2/imgproc/imgproc.hpp>
 
 #include "sonar_image_proc/ColorMaps.h"
+#include "sonar_image_proc/CoordinateTable.h"
 #include "sonar_image_proc/DrawSonar.h"
 #include "sonar_image_proc/HistogramGenerator.h"
 #include "sonar_image_proc/ImageLayout.h"
@@ -292,259 +294,312 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
       return;
     }
 
-    const std::size_t n_ranges = msg->ranges.size();
-    // beam_directions is what every consumer downstream indexes by
-    // (interface nBearings(), the GPU stride); image.beam_count is the
-    // producer's claim about the payload stride. A mismatch means the decode
-    // below would silently skew the fan — drop instead. beam_count 0
-    // (pre-a355c65 bags never populated it) defers to beam_directions.
-    const std::size_t n_bearings = msg->beam_directions.size();
-    if (msg->image.beam_count != 0 && msg->image.beam_count != n_bearings) {
-      RCLCPP_ERROR_THROTTLE(
-          this->get_logger(), *this->get_clock(), 5000,
-          "Dropping sonar image: image.beam_count %u != %zu beam_directions",
-          msg->image.beam_count, n_bearings);
-      return;
-    }
-    std::size_t elem = 0;
-    if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
-    else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
-    else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
-    if (elem == 0) {
-      // FLOAT32 (in the message contract, unsupported here) or garbage: the
-      // interface reads every sample as 0, so this previously published an
-      // all-black fan with no diagnostic on the range_major path.
-      RCLCPP_ERROR_THROTTLE(
-          this->get_logger(), *this->get_clock(), 5000,
-          "Dropping sonar image: unsupported image dtype %u",
-          msg->image.dtype);
-      return;
-    }
-
-    auto working_msg = msg;
-    if (input_image_layout_ == "beam_major") {
-      // Copy the metadata only: the copy constructor also duplicated
-      // image.data (~0.5 MB per ping at 493x512x2) just for the transpose
-      // below to overwrite it.
-      auto range_major =
-          std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>();
-      range_major->header = msg->header;
-      range_major->ping_info = msg->ping_info;
-      range_major->beam_directions = msg->beam_directions;
-      range_major->ranges = msg->ranges;
-      range_major->image.is_bigendian = msg->image.is_bigendian;
-      range_major->image.dtype = msg->image.dtype;
-      range_major->image.beam_count = msg->image.beam_count;
-      if (!sonar_image_proc::beamMajorToRangeMajor(
-              msg->image.data, n_ranges, n_bearings, elem,
-              range_major->image.data)) {
+    try {
+      const std::size_t n_ranges = msg->ranges.size();
+      // beam_directions is what every consumer downstream indexes by
+      // (interface nBearings(), the GPU stride); image.beam_count is the
+      // producer's claim about the payload stride. A mismatch means the decode
+      // below would silently skew the fan — drop instead. beam_count 0
+      // (pre-a355c65 bags never populated it) defers to beam_directions.
+      const std::size_t n_bearings = msg->beam_directions.size();
+      if (msg->image.beam_count != 0 && msg->image.beam_count != n_bearings) {
         RCLCPP_ERROR_THROTTLE(
             this->get_logger(), *this->get_clock(), 5000,
-            "Dropping sonar image: could not decode beam-major payload");
+            "Dropping sonar image: image.beam_count %u != %zu beam_directions",
+            msg->image.beam_count, n_bearings);
         return;
       }
-      working_msg = std::move(range_major);
-    } else if (input_image_layout_ != "range_major") {
-      RCLCPP_ERROR_THROTTLE(
-          this->get_logger(), *this->get_clock(), 5000,
-          "Unknown input_image_layout '%s' (expected beam_major or range_major)",
-          input_image_layout_.c_str());
-      return;
-    }
+      std::size_t elem = 0;
+      if (msg->image.dtype == msg->image.DTYPE_UINT8) elem = 1;
+      else if (msg->image.dtype == msg->image.DTYPE_UINT16) elem = 2;
+      else if (msg->image.dtype == msg->image.DTYPE_UINT32) elem = 4;
+      if (elem == 0) {
+        // FLOAT32 (in the message contract, unsupported here) or garbage: the
+        // interface reads every sample as 0, so this previously published an
+        // all-black fan with no diagnostic on the range_major path.
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: unsupported image dtype %u",
+            msg->image.dtype);
+        return;
+      }
 
-    SonarImageMsgInterface interface(working_msg);
-    if (interface.nRanges() < 2 || interface.nBearings() < 2) {
-      RCLCPP_ERROR_THROTTLE(
-          this->get_logger(), *this->get_clock(), 5000,
-          "Dropping sonar image: rendering requires at least 2 ranges and "
-          "2 bearings (got %d ranges x %d bearings)",
-          interface.nRanges(), interface.nBearings());
-      return;
-    }
-    // A data buffer shorter than ranges*bearings*elem was read out of bounds
-    // by every consumer below (the CPU index() lookups and the GPU H2D copy
-    // alike) — validate once, before any path touches it.
-    {
-      const size_t need = static_cast<size_t>(interface.nRanges()) *
-                          static_cast<size_t>(interface.nBearings()) * elem;
-      if (elem > 0 && working_msg->image.data.size() < need) {
+      // Keep the size arithmetic and the legacy int-valued drawing API in
+      // range before either a layout conversion or renderer sees the payload.
+      // In particular, a wrapped product could otherwise make a malformed
+      // range-major image appear large enough for the GPU copy below.
+      if (n_ranges < 2 || n_bearings < 2 ||
+          n_ranges > static_cast<std::size_t>(
+                         std::numeric_limits<int>::max()) ||
+          n_bearings > static_cast<std::size_t>(
+                           std::numeric_limits<int>::max()) ||
+          n_ranges > std::numeric_limits<std::size_t>::max() / n_bearings) {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: invalid dimensions (%zu ranges x %zu "
+            "bearings)",
+            n_ranges, n_bearings);
+        return;
+      }
+      const std::size_t cell_count = n_ranges * n_bearings;
+      if (cell_count > std::numeric_limits<std::size_t>::max() / elem) {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: byte count overflows for %zu ranges x "
+            "%zu bearings x %zu bytes",
+            n_ranges, n_bearings, elem);
+        return;
+      }
+      const std::size_t required_bytes = cell_count * elem;
+      if (msg->image.data.size() < required_bytes) {
         RCLCPP_ERROR_THROTTLE(
             this->get_logger(), *this->get_clock(), 5000,
             "Dropping sonar image: %zu data bytes < %zu required "
-            "(%d ranges x %d bearings)",
-            working_msg->image.data.size(), need, interface.nRanges(),
-            interface.nBearings());
+            "(%zu ranges x %zu bearings)",
+            msg->image.data.size(), required_bytes, n_ranges, n_bearings);
         return;
       }
-    }
-    if (log_scale_) {
-      interface.do_log_scale(min_db_, max_db_);
-    }
 
-    Seconds rect_elapsed = Seconds::zero();
-    Seconds rectified_elapsed = Seconds::zero();
-    Seconds floor_projected_elapsed = Seconds::zero();
-    Seconds map_elapsed = Seconds::zero();
-    Seconds histogram_elapsed = Seconds::zero();
-
-    if (publish_histogram_) {
-      auto begin = SteadyClock::now();
-
-      auto histogram_out = UInt32MultiArray();
-      histogram_out.data = HistogramGenerator::Generate(interface);
-
-      histogram_pub_->publish(histogram_out);
-
-      histogram_elapsed = SteadyClock::now() - begin;
-    }
-
-    {
-      auto begin = SteadyClock::now();
-
-      cv::Mat rect_mat;
-      cv::Mat sonar_mat;
-      bool gpu_drawn = false;
-#ifdef SONAR_IMAGE_PROC_WITH_CUDA
-      // GPU draw: one shot produces both the rect image and the fan (see
-      // GpuSonarDraw.h — LUT stage exact, remap visually equivalent). Any
-      // failure or unsupported input falls through to the CPU path below.
-      if (use_gpu_ && lut_valid_ &&
-          working_msg->image.dtype ==
-              marine_acoustic_msgs::msg::SonarImageData::DTYPE_UINT8 &&
-          sonar_image_proc::gpu::available()) {
-        const int n_ranges = interface.nRanges();
-        const int n_bearings = interface.nBearings();
-        const auto az = interface.azimuthBounds();
-        const float display_max_range =
-            sonar_drawer_.effectiveMaxRange(interface);
-        const float draw_ppm =
-            sonar_drawer_.effectivePixelsPerMeter(interface);
-        const auto geom = sonar_image_proc::gpu::fanGeometry(
-            display_max_range, az.first, az.second, draw_ppm);
-        if (n_ranges > 0 && n_bearings > 0 && geom.width > 0 &&
-            geom.height > 0) {
-          rect_mat.create(cv::Size(n_ranges, n_bearings), CV_8UC3);
-          sonar_mat.create(cv::Size(geom.width, geom.height), CV_8UC3);
-          gpu_drawn = sonar_image_proc::gpu::drawSonar(
-              working_msg->image.data.data(), n_ranges, n_bearings,
-              interface.minRange(), interface.maxRange(),
-              interface.azimuths().data(), draw_ppm,
-              lut_.data(), rect_mat.data, geom, sonar_mat.data);
+      // Reject malformed coordinate tables before bounds calculation or the
+      // fan remap's binary search.  A range table has one physical direction;
+      // beam bearings may be ascending or descending, but must not reverse or
+      // repeat within a ping.
+      bool ranges_ascending = false;
+      bool bearings_ascending = false;
+      SonarImageMsgInterface input_geometry(msg);
+      bool directions_valid = true;
+      for (const auto &direction : msg->beam_directions) {
+        const double norm_squared = direction.x * direction.x +
+                                    direction.y * direction.y +
+                                    direction.z * direction.z;
+        if (!std::isfinite(norm_squared) || norm_squared <= 1e-12) {
+          directions_valid = false;
+          break;
         }
       }
-#endif
-      if (!gpu_drawn)
-        rect_mat = sonar_drawer_.drawRectSonarImage(interface, *color_map_);
-
-      // Rotate the polar range x bearing image to the more expected format
-      // where zero range
-      // is at the bottom of the image, with negative azimuth to the right
-      // aka (rotated 90 degrees CCW). Subscriber-gated like the OSD: both names
-      // are inspection outputs, and nothing deployed consumes either one.
-      const bool polar_wanted = polar_pub_->get_subscription_count() > 0;
-      const bool legacy_rect_wanted =
-          rect_pub_ && rect_pub_->get_subscription_count() > 0;
-      if (polar_wanted || legacy_rect_wanted) {
-        cv::Mat rotated_rect;
-        cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
-        if (polar_wanted)
-          cvBridgeAndPublish(working_msg, rotated_rect, polar_pub_);
-        if (legacy_rect_wanted)
-          cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
+      if (!directions_valid ||
+          !sonar_image_proc::validateCoordinateTable(msg->ranges,
+                                                     ranges_ascending) ||
+          !ranges_ascending || msg->ranges.front() <= 0.0f ||
+          !sonar_image_proc::validateCoordinateTable(input_geometry.azimuths(),
+                                                     bearings_ascending)) {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Dropping sonar image: ranges must be finite, positive and "
+            "strictly increasing; beam directions must produce one finite, "
+            "strictly monotonic bearing table");
+        return;
       }
 
-      rect_elapsed = SteadyClock::now() - begin;
-      begin = SteadyClock::now();
+      auto working_msg = msg;
+      if (input_image_layout_ == "beam_major") {
+        // Copy the metadata only: the copy constructor also duplicated
+        // image.data (~0.5 MB per ping at 493x512x2) just for the transpose
+        // below to overwrite it.
+        auto range_major =
+            std::make_shared<marine_acoustic_msgs::msg::ProjectedSonarImage>();
+        range_major->header = msg->header;
+        range_major->ping_info = msg->ping_info;
+        range_major->beam_directions = msg->beam_directions;
+        range_major->ranges = msg->ranges;
+        range_major->image.is_bigendian = msg->image.is_bigendian;
+        range_major->image.dtype = msg->image.dtype;
+        range_major->image.beam_count = msg->image.beam_count;
+        if (!sonar_image_proc::beamMajorToRangeMajor(
+                msg->image.data, n_ranges, n_bearings, elem,
+                range_major->image.data)) {
+          RCLCPP_ERROR_THROTTLE(
+              this->get_logger(), *this->get_clock(), 5000,
+              "Dropping sonar image: could not decode beam-major payload");
+          return;
+        }
+        working_msg = std::move(range_major);
+      } else if (input_image_layout_ != "range_major") {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(), *this->get_clock(), 5000,
+            "Unknown input_image_layout '%s' (expected beam_major or range_major)",
+            input_image_layout_.c_str());
+        return;
+      }
 
-      publishRectifiedProducts(working_msg, interface, rect_mat);
+      SonarImageMsgInterface interface(working_msg);
+      if (log_scale_) {
+        interface.do_log_scale(min_db_, max_db_);
+      }
 
-      rectified_elapsed = SteadyClock::now() - begin;
-      begin = SteadyClock::now();
+      Seconds rect_elapsed = Seconds::zero();
+      Seconds rectified_elapsed = Seconds::zero();
+      Seconds floor_projected_elapsed = Seconds::zero();
+      Seconds map_elapsed = Seconds::zero();
+      Seconds histogram_elapsed = Seconds::zero();
 
-      publishFloorProjectedProducts(working_msg, interface, rect_mat);
+      if (publish_histogram_) {
+        auto begin = SteadyClock::now();
 
-      floor_projected_elapsed = SteadyClock::now() - begin;
-      begin = SteadyClock::now();
+        auto histogram_out = UInt32MultiArray();
+        histogram_out.data = HistogramGenerator::Generate(interface);
 
-      if (!gpu_drawn)
-        sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
+        histogram_pub_->publish(histogram_out);
 
-      // Same stamp and frame as the image it describes. Consumers synchronize
-      // fan_info and drawn_sonar_clean exactly by stamp; publishing first also
-      // keeps compatibility with the legacy latch-based CameraInfo consumer.
+        histogram_elapsed = SteadyClock::now() - begin;
+      }
+
       {
-        const auto geom = sonar_drawer_.fanImageGeometry(interface);
-        const auto azimuth = interface.azimuthBounds();
-        sonar_image_proc::msg::FanImageInfo fan_info;
-        fan_info.header = working_msg->header;
-        fan_info.width = geom.width;
-        fan_info.height = geom.height;
-        fan_info.origin_u = geom.origin_x;
-        fan_info.origin_v = geom.height;
-        fan_info.pixels_per_meter = geom.pixels_per_meter;
-        fan_info.min_range = interface.minRange();
-        fan_info.max_range = sonar_drawer_.effectiveMaxRange(interface);
-        fan_info.min_bearing = azimuth.first;
-        fan_info.max_bearing = azimuth.second;
-        fan_info_pub_->publish(fan_info);
+        auto begin = SteadyClock::now();
 
-        if (camera_info_pub_) {
-          sensor_msgs::msg::CameraInfo info;
-          info.header = working_msg->header;
-          info.width = geom.width;
-          info.height = geom.height;
-          info.distortion_model = "";
-          info.d.clear();
-          info.k = {geom.pixels_per_meter, 0.0,
-                    static_cast<double>(geom.origin_x), 0.0,
-                    geom.pixels_per_meter, static_cast<double>(geom.height),
-                    0.0, 0.0, 1.0};
-          info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-          info.p = {geom.pixels_per_meter, 0.0,
-                    static_cast<double>(geom.origin_x), 0.0, 0.0,
-                    geom.pixels_per_meter, static_cast<double>(geom.height),
-                    0.0, 0.0, 0.0, 1.0, 0.0};
-          camera_info_pub_->publish(info);
+        cv::Mat rect_mat;
+        cv::Mat sonar_mat;
+        bool gpu_drawn = false;
+#ifdef SONAR_IMAGE_PROC_WITH_CUDA
+        // GPU draw: one shot produces both the rect image and the fan (see
+        // GpuSonarDraw.h — LUT stage exact, remap visually equivalent). Any
+        // failure or unsupported input falls through to the CPU path below.
+        if (use_gpu_ && lut_valid_ &&
+            working_msg->image.dtype ==
+                marine_acoustic_msgs::msg::SonarImageData::DTYPE_UINT8 &&
+            sonar_image_proc::gpu::available()) {
+          const int n_ranges = interface.nRanges();
+          const int n_bearings = interface.nBearings();
+          const auto az = interface.azimuthBounds();
+          const float display_max_range =
+              sonar_drawer_.effectiveMaxRange(interface);
+          const float draw_ppm =
+              sonar_drawer_.effectivePixelsPerMeter(interface);
+          const auto geom = sonar_image_proc::gpu::fanGeometry(
+              display_max_range, az.first, az.second, draw_ppm);
+          if (n_ranges > 0 && n_bearings > 0 && geom.width > 0 &&
+              geom.height > 0) {
+            rect_mat.create(cv::Size(n_ranges, n_bearings), CV_8UC3);
+            sonar_mat.create(cv::Size(geom.width, geom.height), CV_8UC3);
+            gpu_drawn = sonar_image_proc::gpu::drawSonar(
+                working_msg->image.data.data(), n_ranges, n_bearings,
+                interface.minRange(), interface.maxRange(),
+                interface.azimuths().data(), draw_ppm,
+                lut_.data(), rect_mat.data, geom, sonar_mat.data);
+          }
         }
+#endif
+        if (!gpu_drawn)
+          rect_mat = sonar_drawer_.drawRectSonarImage(interface, *color_map_);
+
+        // Rotate the polar range x bearing image to the more expected format
+        // where zero range
+        // is at the bottom of the image, with negative azimuth to the right
+        // aka (rotated 90 degrees CCW). Subscriber-gated like the OSD: both names
+        // are inspection outputs, and nothing deployed consumes either one.
+        const bool polar_wanted = polar_pub_->get_subscription_count() > 0;
+        const bool legacy_rect_wanted =
+            rect_pub_ && rect_pub_->get_subscription_count() > 0;
+        if (polar_wanted || legacy_rect_wanted) {
+          cv::Mat rotated_rect;
+          cv::rotate(rect_mat, rotated_rect, cv::ROTATE_90_COUNTERCLOCKWISE);
+          if (polar_wanted)
+            cvBridgeAndPublish(working_msg, rotated_rect, polar_pub_);
+          if (legacy_rect_wanted)
+            cvBridgeAndPublish(working_msg, rotated_rect, rect_pub_);
+        }
+
+        rect_elapsed = SteadyClock::now() - begin;
+        begin = SteadyClock::now();
+
+        publishRectifiedProducts(working_msg, interface, rect_mat);
+
+        rectified_elapsed = SteadyClock::now() - begin;
+        begin = SteadyClock::now();
+
+        publishFloorProjectedProducts(working_msg, interface, rect_mat);
+
+        floor_projected_elapsed = SteadyClock::now() - begin;
+        begin = SteadyClock::now();
+
+        if (!gpu_drawn)
+          sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
+
+        // Same stamp and frame as the image it describes. Consumers synchronize
+        // fan_info and drawn_sonar_clean exactly by stamp; publishing first also
+        // keeps compatibility with the legacy latch-based CameraInfo consumer.
+        {
+          const auto geom = sonar_drawer_.fanImageGeometry(interface);
+          const auto azimuth = interface.azimuthBounds();
+          sonar_image_proc::msg::FanImageInfo fan_info;
+          fan_info.header = working_msg->header;
+          fan_info.width = geom.width;
+          fan_info.height = geom.height;
+          fan_info.origin_u = geom.origin_x;
+          fan_info.origin_v = geom.height;
+          fan_info.pixels_per_meter = geom.pixels_per_meter;
+          fan_info.min_range = interface.minRange();
+          fan_info.max_range = sonar_drawer_.effectiveMaxRange(interface);
+          fan_info.min_bearing = azimuth.first;
+          fan_info.max_bearing = azimuth.second;
+          fan_info_pub_->publish(fan_info);
+
+          if (camera_info_pub_) {
+            sensor_msgs::msg::CameraInfo info;
+            info.header = working_msg->header;
+            info.width = geom.width;
+            info.height = geom.height;
+            info.distortion_model = "";
+            info.d.clear();
+            info.k = {geom.pixels_per_meter, 0.0,
+                      static_cast<double>(geom.origin_x), 0.0,
+                      geom.pixels_per_meter, static_cast<double>(geom.height),
+                      0.0, 0.0, 1.0};
+            info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+            info.p = {geom.pixels_per_meter, 0.0,
+                      static_cast<double>(geom.origin_x), 0.0, 0.0,
+                      geom.pixels_per_meter, static_cast<double>(geom.height),
+                      0.0, 0.0, 0.0, 1.0, 0.0};
+            camera_info_pub_->publish(info);
+          }
+        }
+        if (clean_pub_->get_subscription_count() > 0)
+          cvBridgeAndPublish(working_msg, sonar_mat, clean_pub_);
+
+        const cv::Mat annotated_mat =
+            sonar_drawer_.drawOverlay(interface, sonar_mat);
+        cvBridgeAndPublish(working_msg, annotated_mat, pub_);
+
+        // Compatibility alias for existing dashboards. New consumers should
+        // use drawn_sonar (operator) or drawn_sonar_clean (machine vision).
+        if (osd_pub_->get_subscription_count() > 0)
+          cvBridgeAndPublish(working_msg, annotated_mat, osd_pub_);
+
+        map_elapsed = SteadyClock::now() - begin;
       }
-      if (clean_pub_->get_subscription_count() > 0)
-        cvBridgeAndPublish(working_msg, sonar_mat, clean_pub_);
 
-      const cv::Mat annotated_mat =
-          sonar_drawer_.drawOverlay(interface, sonar_mat);
-      cvBridgeAndPublish(working_msg, annotated_mat, pub_);
+      if (publish_timing_) {
+        std::ostringstream output;
 
-      // Compatibility alias for existing dashboards. New consumers should
-      // use drawn_sonar (operator) or drawn_sonar_clean (machine vision).
-      if (osd_pub_->get_subscription_count() > 0)
-        cvBridgeAndPublish(working_msg, annotated_mat, osd_pub_);
+        output << "{";
+        output << "\"draw_total\" : "
+               << (map_elapsed + rect_elapsed + rectified_elapsed +
+                   floor_projected_elapsed)
+                      .count();
+        output << ", \"rect\" : " << rect_elapsed.count();
+        output << ", \"rectified\" : " << rectified_elapsed.count();
+        output << ", \"floor_projected\" : "
+               << floor_projected_elapsed.count();
+        output << ", \"map\" : " << map_elapsed.count();
 
-      map_elapsed = SteadyClock::now() - begin;
-    }
+        if (publish_histogram_)
+          output << ", \"histogram\" : " << histogram_elapsed.count();
 
-    if (publish_timing_) {
-      std::ostringstream output;
+        output << "}";
 
-      output << "{";
-      output << "\"draw_total\" : "
-             << (map_elapsed + rect_elapsed + rectified_elapsed +
-                 floor_projected_elapsed)
-                    .count();
-      output << ", \"rect\" : " << rect_elapsed.count();
-      output << ", \"rectified\" : " << rectified_elapsed.count();
-      output << ", \"floor_projected\" : "
-             << floor_projected_elapsed.count();
-      output << ", \"map\" : " << map_elapsed.count();
+        auto out_msg = std_msgs::msg::String();
+        out_msg.data = output.str();
 
-      if (publish_histogram_)
-        output << ", \"histogram\" : " << histogram_elapsed.count();
-
-      output << "}";
-
-      auto out_msg = std_msgs::msg::String();
-      out_msg.data = output.str();
-
-      timing_pub_->publish(out_msg);
+        timing_pub_->publish(out_msg);
+      }
+    } catch (const cv::Exception &error) {
+      RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                            "Dropping sonar image after OpenCV error: %s",
+                            error.what());
+    } catch (const std::exception &error) {
+      RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                            "Dropping sonar image after processing error: %s",
+                            error.what());
     }
   }
 
