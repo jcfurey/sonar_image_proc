@@ -57,12 +57,11 @@ static void putOutlinedText(cv::Mat &image, const std::string &text,
   const cv::Size textSize = cv::getTextSize(
       text, cv::FONT_HERSHEY_PLAIN, fontScale, textThickness, &baseline);
 
-  const int maxX = std::max(0, image.cols - textSize.width - 1);
-  const int minY = std::min(image.rows - 1, textSize.height + 1);
-  const int maxY = std::max(minY, image.rows - baseline - 1);
-  const cv::Point origin(
-      std::clamp(cvRound(center.x - textSize.width / 2.0f), 0, maxX),
-      std::clamp(cvRound(center.y + textSize.height / 2.0f), minY, maxY));
+  // The OSD canvas is sized around every label before this is called. Do not
+  // clamp here: clamping a label at an edge breaks its visual registration
+  // with the arc/ray it annotates.
+  const cv::Point origin(cvRound(center.x - textSize.width / 2.0f),
+                         cvRound(center.y + textSize.height / 2.0f));
 
   // A dark halo keeps white annotations legible over strong returns without
   // hiding a rectangular patch of sonar data behind each label.
@@ -70,6 +69,32 @@ static void putOutlinedText(cv::Mat &image, const std::string &text,
               cv::Scalar(0, 0, 0, 230), textThickness + 2, cv::LINE_AA);
   cv::putText(image, text, origin, cv::FONT_HERSHEY_PLAIN, fontScale, color,
               textThickness, cv::LINE_AA);
+}
+
+// Bounding rectangle of the pixels touched by putOutlinedText(), including
+// the dark halo. It is used to grow the OSD canvas before labels are drawn,
+// keeping their anchors exact instead of clamping them into the fan raster.
+static cv::Rect textBounds(const std::string &text, const cv::Point2f &center,
+                           float fontScale, int lineThickness) {
+  const int textThickness = std::max(1, lineThickness);
+  int baseline = 0;
+  const cv::Size textSize = cv::getTextSize(
+      text, cv::FONT_HERSHEY_PLAIN, fontScale, textThickness, &baseline);
+  const cv::Point origin(cvRound(center.x - textSize.width / 2.0f),
+                         cvRound(center.y + textSize.height / 2.0f));
+  const int halo = textThickness + 2;
+  return cv::Rect(origin.x - halo, origin.y - textSize.height - halo,
+                  textSize.width + 2 * halo,
+                  textSize.height + baseline + 2 * halo);
+}
+
+static float labelClearance(const std::string &text, float fontScale,
+                            int lineThickness) {
+  const cv::Rect bounds =
+      textBounds(text, cv::Point2f(0.0f, 0.0f), fontScale, lineThickness);
+  return 0.5f * std::hypot(static_cast<float>(bounds.width),
+                            static_cast<float>(bounds.height)) +
+         6.0f;
 }
 
 // Default to the native scale (see setPixelsPerMeter): the sonar's range
@@ -293,12 +318,19 @@ cv::Mat SonarDrawer::drawOverlay(const AbstractSonarInterface &ping,
   // overlayImage's CV_Assert would abort on it.
   if (sonarImage.empty()) return cv::Mat();
 
-  // Alpha blend overlay onto sonarImage
+  const cv::Mat &overlay =
+      _overlay(ping, sonarImage, overlayConfig(), effectiveMaxRange(ping));
+
+  // The annotated operator image has a display-only border for labels. Keep
+  // the clean fan untouched inside that canvas; its original coordinate frame
+  // continues to be described by FanImageInfo.
+  cv::Mat background = cv::Mat::zeros(overlay.size(), sonarImage.type());
+  sonarImage.copyTo(background(cv::Rect(_overlay.imageOrigin(),
+                                      sonarImage.size())));
+
+  // Alpha blend overlay onto the padded operator image.
   cv::Mat output;
-  overlayImage<unsigned char>(
-      sonarImage,
-      _overlay(ping, sonarImage, overlayConfig(), effectiveMaxRange(ping)),
-      output);
+  overlayImage<unsigned char>(background, overlay, output);
 
   return output;
 }
@@ -1065,7 +1097,7 @@ bool SonarDrawer::CachedOverlay::isValidFor(const AbstractSonarInterface &ping,
                                             const cv::Mat &sonarImage,
                                             const OverlayConfig &config,
                                             float maxRange) const {
-  if (sonarImage.size() != _overlay.size()) return false;
+  if (sonarImage.size() != _source_size) return false;
 
   if (_config_used != config) return false;
   if (_maxRange != maxRange) return false;
@@ -1093,6 +1125,8 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
                                         float maxRange) {
   const cv::Size sz(sonarImage.size());
   _overlay = cv::Mat::zeros(sz, CV_8UC4);
+  _source_size = sz;
+  _image_origin = cv::Point(0, 0);
   if (sz.width <= 0 || sz.height <= 0 || !std::isfinite(maxRange) ||
       maxRange <= 0.0f) {
     return;
@@ -1103,7 +1137,7 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
   // drawn about the wrong apex on any asymmetric crop.
   const int originx = abs(
       static_cast<int>(floor(sz.height * sin(ping.minAzimuth()))));
-  const cv::Point2f origin(originx, sz.height);
+  const cv::Point2f sourceOrigin(originx, sz.height);
 
   const cv::Vec3b color(config.lineColor());
   const cv::Scalar textColor(color[0], color[1], color[2], 255);
@@ -1132,41 +1166,12 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
       arcSpacing = 20.0;
   }
 
-  // Put range values on boresight whenever it is visible. Bearing values live
-  // around the outer arc, so the two scales remain visually distinct. For a
-  // cropped fan that excludes zero, use its angular midpoint instead.
-  const float rangeLabelBearing =
-      (minAzimuth <= 0.0f && maxAzimuth >= 0.0f)
-          ? 0.0f
-          : (minAzimuth + maxAzimuth) / 2.0f;
-  const auto drawRangeArc = [&](float r) {
-    const float radiusPix = (r / maxRange) * sonarImage.size().height;
-
-    cv::ellipse(_overlay, origin, cv::Size(radiusPix, radiusPix), 0,
-                rad2degf(bearingToImage(minAzimuth)),
-                rad2degf(bearingToImage(maxAzimuth)), lineColor,
-                config.lineThickness());
-
-    // Inset range text from its arc enough to separate the maximum-range value
-    // from the 0-degree label. Text placement is also clamped, which keeps it
-    // visible on asymmetric/cropped fans.
-    const float labelInset = std::max(32.0f, 45.0f * config.fontScale());
-    const float labelRadius = std::max(0.0f, radiusPix - labelInset);
-    const float theta = bearingToImage(rangeLabelBearing);
-    const cv::Point2f labelCenter(
-        labelRadius * cos(theta) + origin.x,
-        labelRadius * sin(theta) + origin.y);
-    putOutlinedText(_overlay, rangeLabel(r, arcSpacing), labelCenter,
-                    config.fontScale(), textColor, config.lineThickness());
-  };
-
-  for (float r = arcSpacing; r < maxRange; r += arcSpacing) {
-    drawRangeArc(r);
-  }
-
+  std::vector<float> arcRanges;
+  for (float r = arcSpacing; r < maxRange; r += arcSpacing)
+    arcRanges.push_back(r);
   // The displayed maximum is operationally the most important range value.
   // Draw and label it even when it is not an even multiple of the spacing.
-  drawRangeArc(maxRange);
+  arcRanges.push_back(maxRange);
 
   //== Draw radials ==
   std::vector<float> radials;
@@ -1209,19 +1214,102 @@ void SonarDrawer::CachedOverlay::create(const AbstractSonarInterface &ping,
                           });
   radials.erase(last, radials.end());
 
-  // Draw full bearing rays from the sonar origin, then label them just inside
-  // the maximum-range arc. This makes the image self-describing even in a
-  // generic image viewer or a screenshot.
+  struct Label {
+    std::string text;
+    cv::Point2f center;
+  };
+  std::vector<Label> rangeLabels;
+  std::vector<Label> bearingLabels;
+  rangeLabels.reserve(arcRanges.size());
+  bearingLabels.reserve(radials.size());
+
+  // Range labels live just beyond the low-bearing edge of the fan. Their
+  // anchor has the same radius as the arc it names, while a perpendicular
+  // offset keeps every glyph outside the measured cone. The short exterior
+  // tick makes that registration legible at a glance.
+  const float rangeTheta = bearingToImage(minAzimuth);
+  const cv::Point2f rangeRay(std::cos(rangeTheta), std::sin(rangeTheta));
+  const cv::Point2f rangeOutward(std::sin(rangeTheta), -std::cos(rangeTheta));
+  for (const float r : arcRanges) {
+    const float radiusPix = (r / maxRange) * sz.height;
+    const std::string text = rangeLabel(r, arcSpacing);
+    const float clearance =
+        labelClearance(text, config.fontScale(), config.lineThickness());
+    rangeLabels.push_back(
+        {text, sourceOrigin + radiusPix * rangeRay + clearance * rangeOutward});
+  }
+
+  // Bearing labels sit just past the outer range arc, exactly on the ray they
+  // name. This preserves their degree-to-grid correspondence for both
+  // symmetric and cropped/asymmetric fans.
   for (const auto b : radials) {
     const float theta = bearingToImage(b);
-    const cv::Point2f end(sz.height * cos(theta) + origin.x,
-                          sz.height * sin(theta) + origin.y);
-    cv::line(_overlay, origin, end, lineColor, config.lineThickness());
+    const cv::Point2f ray(std::cos(theta), std::sin(theta));
+    const std::string text = bearingLabel(b);
+    const float clearance =
+        labelClearance(text, config.fontScale(), config.lineThickness());
+    bearingLabels.push_back({text, sourceOrigin + (sz.height + clearance) * ray});
+  }
 
-    const float labelRadius = std::max(0.0f, sz.height - 18.0f);
-    const cv::Point2f labelCenter(labelRadius * cos(theta) + origin.x,
-                                  labelRadius * sin(theta) + origin.y);
-    putOutlinedText(_overlay, bearingLabel(b), labelCenter,
+  // Find the tight display canvas that holds the original fan and every
+  // external label. This avoids clipping (and therefore avoids moving labels
+  // away from their grid markers) even for wide or asymmetric field-of-view
+  // pings.
+  cv::Rect bounds(0, 0, sz.width, sz.height);
+  const auto includeLabel = [&](const Label &label) {
+    bounds |= textBounds(label.text, label.center, config.fontScale(),
+                         config.lineThickness());
+  };
+  for (const auto &label : rangeLabels) includeLabel(label);
+  for (const auto &label : bearingLabels) includeLabel(label);
+
+  constexpr int kCanvasPadding = 4;
+  bounds.x -= kCanvasPadding;
+  bounds.y -= kCanvasPadding;
+  bounds.width += 2 * kCanvasPadding;
+  bounds.height += 2 * kCanvasPadding;
+  _image_origin = cv::Point(-bounds.x, -bounds.y);
+  _overlay = cv::Mat::zeros(bounds.size(), CV_8UC4);
+  const cv::Point2f origin = sourceOrigin +
+                             cv::Point2f(_image_origin.x, _image_origin.y);
+
+  const auto drawRangeArc = [&](float r) {
+    const float radiusPix = (r / maxRange) * sz.height;
+    cv::ellipse(_overlay, origin, cv::Size(radiusPix, radiusPix), 0,
+                rad2degf(bearingToImage(minAzimuth)),
+                rad2degf(bearingToImage(maxAzimuth)), lineColor,
+                config.lineThickness());
+  };
+  for (const float r : arcRanges) drawRangeArc(r);
+
+  constexpr float kLabelTickLength = 8.0f;
+  for (const auto b : radials) {
+    const float theta = bearingToImage(b);
+    const cv::Point2f ray(std::cos(theta), std::sin(theta));
+    const cv::Point2f end = origin + sz.height * ray;
+    cv::line(_overlay, origin, end, lineColor, config.lineThickness());
+    cv::line(_overlay, end, end + kLabelTickLength * ray, lineColor,
+             config.lineThickness());
+  }
+
+  for (const auto &label : rangeLabels) {
+    const cv::Point2f marker = sourceOrigin +
+                               ((label.center - sourceOrigin).dot(rangeRay)) *
+                                   rangeRay;
+    const cv::Point2f tickEnd =
+        marker + kLabelTickLength * rangeOutward +
+        cv::Point2f(_image_origin.x, _image_origin.y);
+    cv::line(_overlay, marker + cv::Point2f(_image_origin.x, _image_origin.y),
+             tickEnd, lineColor, config.lineThickness());
+    putOutlinedText(_overlay, label.text,
+                    label.center + cv::Point2f(_image_origin.x,
+                                                _image_origin.y),
+                    config.fontScale(), textColor, config.lineThickness());
+  }
+  for (const auto &label : bearingLabels) {
+    putOutlinedText(_overlay, label.text,
+                    label.center + cv::Point2f(_image_origin.x,
+                                                _image_origin.y),
                     config.fontScale(), textColor, config.lineThickness());
   }
 
