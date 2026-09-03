@@ -320,8 +320,12 @@ class SonarDrawer {
   cv::Mat remapRectSonarImage(const AbstractSonarInterface &ping,
                               const cv::Mat &rectImage);
 
-  // Creates a copy of sonarImage with the graphical overlay using the
-  // configuration in overlayConfig
+  // Creates an operator-display copy of sonarImage with the graphical overlay
+  // using the configuration in overlayConfig. The returned image includes a
+  // small black OSD border: range labels sit beyond their arc markers and
+  // bearing labels beyond their ray markers, rather than obscuring returns in
+  // the fan. Use the clean fan image together with FanImageInfo for
+  // pixel-to-metre work; the OSD image deliberately has a larger canvas.
   cv::Mat drawOverlay(const AbstractSonarInterface &ping,
                       const cv::Mat &sonarImage);
 
@@ -423,11 +427,21 @@ class SonarDrawer {
 
   struct CachedOverlay : public Cached {
    public:
-    CachedOverlay() : Cached(), _maxRange(0.0f) { ; }
+    CachedOverlay()
+        : Cached(),
+          _maxRange(0.0f),
+          _source_size(0, 0),
+          _image_origin(0, 0) { ; }
 
     const cv::Mat &operator()(const AbstractSonarInterface &ping,
                               const cv::Mat &sonarImage,
                               const OverlayConfig &config, float maxRange);
+
+    // Location of the unannotated fan in the padded OSD canvas returned by
+    // operator(). It is intentionally internal to SonarDrawer: external
+    // consumers use drawn_sonar_clean + FanImageInfo, whose coordinates are
+    // not changed by this display-only border.
+    cv::Point imageOrigin() const { return _image_origin; }
 
    private:
     bool isValidFor(const AbstractSonarInterface &ping,
@@ -440,6 +454,8 @@ class SonarDrawer {
     cv::Mat _overlay;
     OverlayConfig _config_used;
     float _maxRange;
+    cv::Size _source_size;
+    cv::Point _image_origin;
   } _overlay;
 };  // class SonarDrawer
 

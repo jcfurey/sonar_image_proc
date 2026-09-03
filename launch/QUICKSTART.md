@@ -66,7 +66,7 @@ ros2 launch sonar_image_proc draw_sonar.launch.py \
 ## Key Topics Published
 
 After launching, you'll get:
-- `/oculus/drawn_sonar` - Annotated operator image with range/bearing labels
+- `/oculus/drawn_sonar` - Annotated operator image; range/bearing labels sit outside the cone in an OSD border
 - `/oculus/drawn_sonar_clean` - Annotation-free machine-vision image
 - `/oculus/drawn_sonar_osd` - Compatibility alias of `drawn_sonar`
 - `/oculus/drawn_sonar_polar` - Rotated range×bearing inspection view

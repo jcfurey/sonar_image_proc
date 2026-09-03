@@ -27,14 +27,12 @@ Subscribes to the topic `sonar_image` of type [marine_acoustic_msgs/ProjectedSon
 By default publishes Cartesian fan images, a polar inspection image, a
 forward-facing range-bearing rectangle, and stamped geometry:
 
-* `drawn_sonar` is the operator image: a Cartesian fan with range rings, meter
-labels, bearing rays, and degree labels baked into the pixels. It has the
-origin (range = 0) of the sonar centered on the bottom edge of
-the image, and azimuth=0 extending vertically upwards in the image.  By default,
-the image height is set by the number range bins, and the image width is
-automatically determined based on the height and the min/max azimuth of the
-sonar image.   The color map used to convert the sonar intensity to RGB is set
-in code.
+* `drawn_sonar` is the operator image: a Cartesian fan with range rings and
+bearing rays. Its meter labels sit outside the low-bearing edge beside their
+ring markers, and degree labels sit outside the outer ring on their respective
+rays, so neither obscures acoustic returns. It has a black display border for
+those labels; do not use its pixel dimensions as fan geometry. The color map
+used to convert the sonar intensity to RGB is set in code.
 
 * `drawn_sonar_clean` contains the same Cartesian fan without annotations. Use
 this topic for optical flow, feature tracking, recording for machine learning,
@@ -108,9 +106,9 @@ supply a more general surface model later without changing the pinhole
 projection itself.
 
 * `fan_info` (`sonar_image_proc/FanImageInfo`) carries the exact per-ping
-orthographic geometry of `drawn_sonar` and `drawn_sonar_clean`: dimensions,
-fan apex, pixels per metre, range limits, and bearing limits. Consumers should
-pair it with the image by header stamp.
+orthographic geometry of `drawn_sonar_clean`: dimensions, fan apex, pixels per
+metre, range limits, and bearing limits. Consumers should pair it with the
+clean image by header stamp; `drawn_sonar` adds an OSD-only border.
 
 * `drawn_sonar_rect` and `camera_info` are deprecated compatibility outputs.
 The former aliases `drawn_sonar_polar`; the latter historically stored fan

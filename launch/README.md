@@ -112,7 +112,7 @@ ros2 launch sonar_image_proc sonar_postproc.launch.py \
 ## Published Topics
 
 ### draw_sonar node outputs:
-- `drawn_sonar` (sensor_msgs/Image): Annotated operator fan with range and bearing labels
+- `drawn_sonar` (sensor_msgs/Image): Annotated operator fan; its OSD border keeps range and bearing labels outside the cone
 - `drawn_sonar_clean` (sensor_msgs/Image): Annotation-free fan for machine vision
 - `drawn_sonar_osd` (sensor_msgs/Image): Compatibility alias of `drawn_sonar`
 - `drawn_sonar_polar` (sensor_msgs/Image): Rotated range×bearing inspection image; not camera-rectified

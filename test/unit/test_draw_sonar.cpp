@@ -691,16 +691,55 @@ TEST(TestDrawSonar, OverlayAnchorsBearingGridAtZero) {
   const auto geometry = drawer.fanImageGeometry(ping);
   ASSERT_GT(geometry.width, 0);
   ASSERT_GT(geometry.height, 0);
-  const cv::Mat clean =
+  cv::Mat clean =
       cv::Mat::zeros(geometry.height, geometry.width, CV_8UC3);
+  // A unique transparent-overlay pixel tells us where the source fan begins
+  // in the padded OSD canvas without making that display-only offset public.
+  clean.at<cv::Vec3b>(0, 0) = cv::Vec3b(255, 0, 255);
   const cv::Mat annotated = drawer.drawOverlay(ping, clean);
+
+  cv::Point fanTopLeft(-1, -1);
+  for (int y = 0; y < annotated.rows && fanTopLeft.x < 0; ++y) {
+    for (int x = 0; x < annotated.cols; ++x) {
+      if (annotated.at<cv::Vec3b>(y, x) == cv::Vec3b(255, 0, 255)) {
+        fanTopLeft = cv::Point(x, y);
+        break;
+      }
+    }
+  }
+  ASSERT_GE(fanTopLeft.x, 0);
 
   // The zero-bearing ray runs vertically from the sonar origin. This pixel is
   // well away from the outer range arc and all text, so a nonzero value pins
   // the boresight itself rather than merely the existence of an overlay.
   const cv::Vec3b boresight = annotated.at<cv::Vec3b>(
-      geometry.height / 2, geometry.origin_x);
+      fanTopLeft.y + geometry.height / 2, fanTopLeft.x + geometry.origin_x);
   EXPECT_GT(boresight[0] + boresight[1] + boresight[2], 0);
+}
+
+TEST(TestDrawSonar, OverlayPlacesLabelsOnPaddedOsdCanvas) {
+  TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f},
+                {-65.0f * static_cast<float>(M_PI) / 180.0f, 0.0f,
+                 65.0f * static_cast<float>(M_PI) / 180.0f});
+
+  sonar_image_proc::SonarDrawer drawer;
+  drawer.setPixelsPerMeter(125.0f);
+  drawer.overlayConfig()
+      .setRangeSpacing(1.0f)
+      .setRadialSpacing(10.0f)
+      .setRadialAtZero(true)
+      .setLineAlpha(1.0f)
+      .setFontScale(0.8f);
+
+  const auto geometry = drawer.fanImageGeometry(ping);
+  const cv::Mat clean =
+      cv::Mat::zeros(geometry.height, geometry.width, CV_8UC3);
+  const cv::Mat annotated = drawer.drawOverlay(ping, clean);
+
+  // Labels no longer consume pixels in the metric fan. The OSD is deliberately
+  // larger, with its labels and short leader ticks in the new border.
+  EXPECT_GT(annotated.rows, clean.rows);
+  EXPECT_GT(annotated.cols, clean.cols);
 }
 
 }  // namespace
