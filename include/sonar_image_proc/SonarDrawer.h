@@ -382,6 +382,7 @@ class SonarDrawer {
       float _pixelsPerMeter;
       float _maxRange;
       std::vector<float> _azimuths;
+      std::vector<float> _ranges;
     };
 
     // Building a remap table is by far the most expensive thing here -- tens

@@ -743,3 +743,65 @@ TEST(TestDrawSonar, OverlayPlacesLabelsOnPaddedOsdCanvas) {
 }
 
 }  // namespace
+
+TEST(TestDrawSonar, FanUsesActualNonuniformRangesAndInvalidatesInteriorChanges) {
+  TestPing first({0.25f, 1.0f, 4.0f}, {-0.6f, 0.0f, 0.6f});
+  TestPing second({0.25f, 3.0f, 4.0f}, {-0.6f, 0.0f, 0.6f});
+  sonar_image_proc::SonarDrawer drawer;
+  drawer.setPixelsPerMeter(32.0f);
+  cv::Mat source = cv::Mat::zeros(3, 3, CV_32FC1);
+  source.col(1).setTo(1.0f);
+  for (const auto* ping : {&first, &second, &first}) {
+    const auto geometry = drawer.fanImageGeometry(*ping);
+    const cv::Mat fan = drawer.remapRectSonarImage(*ping, source);
+    cv::Point peak;
+    cv::minMaxLoc(fan.col(geometry.origin_x), nullptr, nullptr, nullptr, &peak);
+    const float range = (geometry.height - peak.y) / geometry.pixels_per_meter;
+    EXPECT_NEAR(range, ping->ranges()[1], 1.0f / geometry.pixels_per_meter);
+  }
+}
+
+#ifdef SONAR_IMAGE_PROC_WITH_CUDA
+#include "sonar_image_proc/GpuSonarDraw.h"
+
+TEST(TestDrawSonar, CudaFanMatchesCpuWithNonuniformRangesAndBearings) {
+  namespace gpu = sonar_image_proc::gpu;
+  if (!gpu::available()) GTEST_SKIP() << "CUDA device unavailable";
+  constexpr int N = 101;
+  for (int B : {256, 512}) {
+    for (bool descending : {false, true}) {
+      std::vector<float> ranges(N), bearings(B);
+      for (int r = 0; r < N; ++r) ranges[r] = 0.1f + 4.0f * r * r / ((N - 1) * (N - 1));
+      for (int b = 0; b < B; ++b) bearings[b] = std::asin(1.8f * b / (B - 1) - 0.9f);
+      if (descending) std::reverse(bearings.begin(), bearings.end());
+      TestPing ping(ranges, bearings);
+      std::vector<std::uint8_t> image(N * B);
+      std::vector<std::uint8_t> lut(256 * 3);
+      for (int i = 0; i < 256 * 3; ++i) lut[i] = i / 3;
+      cv::Mat source(B, N, CV_8UC3);
+      for (int r = 0; r < N; ++r) {
+        for (int b = 0; b < B; ++b) {
+          const std::uint8_t v = (r * 7 + b * 3) % 256;
+          image[r * B + b] = v;
+          source.at<cv::Vec3b>(b, r) = cv::Vec3b(v, v, v);
+        }
+      }
+      sonar_image_proc::SonarDrawer drawer;
+      drawer.setPixelsPerMeter(32.0f);
+      drawer.setMaxRange(3.0f);  // clipping must retain source coordinates
+      const auto g = gpu::fanGeometry(3.0f, ping.minAzimuth(), ping.maxAzimuth(), 32.0f);
+      cv::Mat rect(B, N, CV_8UC3), fan(g.height, g.width, CV_8UC3);
+      ASSERT_TRUE(gpu::drawSonar(image.data(), N, B, ranges.data(), bearings.data(),
+                                32.0f, lut.data(), rect.data, g, fan.data));
+      EXPECT_EQ(cv::norm(rect, source, cv::NORM_INF), 0.0);
+      const cv::Mat cpu = drawer.remapRectSonarImage(ping, source);
+      ASSERT_EQ(cpu.size(), fan.size());
+      cv::Mat difference;
+      cv::absdiff(cpu, fan, difference);
+      // OpenCV quantizes map coordinates to 1/32 pixel; CUDA retains float.
+      EXPECT_LT(cv::mean(difference)[0], 1.0);
+      EXPECT_LE(cv::norm(difference, cv::NORM_INF), 10.0);
+    }
+  }
+}
+#endif
