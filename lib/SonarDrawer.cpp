@@ -451,8 +451,6 @@ void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
   // re-check the cached-bounds state -- millions of times per map.
   const float minRange = ping.minRange();
   const float sourceMaxRange = ping.maxRange();
-  const float rangeSpan = sourceMaxRange - minRange;
-  const float lastColumn = ping.nRanges() - 1;
   const int rows = newmap.rows, cols = newmap.cols;
 
   // For cv::remap, a map is
@@ -496,11 +494,7 @@ void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
         // Out of range - map to transparent/invalid
         xp = -1.0f;  // Will be clamped/handled by remap
       } else {
-        const float rangeFraction = (rangeInMeters - minRange) / rangeSpan;
-        // The first and last range values correspond to source columns 0 and
-        // n-1. Multiplying by n mapped maxRange one column past the image,
-        // blackening the outer edge and shifting every intermediate sample.
-        xp = rangeFraction * lastColumn;
+        xp = coordinateToIndex(ping.ranges(), rangeInMeters, true);
       }
 
       // Interpolate against the real (non-uniform) bearing table; -1 (outside
@@ -522,6 +516,7 @@ void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
   _pixelsPerMeter = pixelsPerMeter;
   _maxRange = displayMaxRange;
   _azimuths = azimuths;
+  _ranges = ping.ranges();
 }
 
 bool SonarDrawer::CachedMap::Entry::isValidFor(
@@ -533,6 +528,7 @@ bool SonarDrawer::CachedMap::Entry::isValidFor(
   if (_pixelsPerMeter != pixelsPerMeter) return false;
   if (_maxRange != maxRange) return false;
   if (_azimuths != ping.azimuths()) return false;
+  if (_ranges != ping.ranges()) return false;
 
   return Cached::isValid(ping);
 }
@@ -540,36 +536,6 @@ bool SonarDrawer::CachedMap::Entry::isValidFor(
 // ==== SonarDrawer::CachedRectifiedMap ====
 
 namespace {
-
-// Convert a physical coordinate into a fractional sample index using an
-// already-validated, possibly non-uniform or descending coordinate table.
-// Returning -1 deliberately sends out-of-domain queries through cv::remap's
-// BORDER_CONSTANT path. Validation is separate because this runs per pixel.
-float coordinateToIndex(const std::vector<float> &samples, float value,
-                        bool ascending) {
-  if (!std::isfinite(value)) return -1.0f;
-  const float low = ascending ? samples.front() : samples.back();
-  const float high = ascending ? samples.back() : samples.front();
-  constexpr float kTolerance = 1e-6f;
-  if (value < low - kTolerance || value > high + kTolerance) return -1.0f;
-  value = std::clamp(value, low, high);
-
-  size_t lo = 0;
-  size_t hi = samples.size() - 1;
-  while (hi - lo > 1) {
-    const size_t mid = (lo + hi) / 2;
-    const bool before =
-        ascending ? samples[mid] <= value : samples[mid] >= value;
-    if (before)
-      lo = mid;
-    else
-      hi = mid;
-  }
-
-  const float span = samples[hi] - samples[lo];
-  if (std::abs(span) <= std::numeric_limits<float>::epsilon()) return -1.0f;
-  return static_cast<float>(lo) + (value - samples[lo]) / span;
-}
 
 bool sameRectifiedGeometry(
     const SonarDrawer::RectifiedGeometry &lhs,

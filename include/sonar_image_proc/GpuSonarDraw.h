@@ -33,6 +33,7 @@ FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,
                         float pixels_per_meter);
 
 // image: bin-major uint8 [range_bin * n_bearings + bearing] (the msg layout).
+// ranges: n_ranges strictly increasing physical ranges (metres).
 // azimuths: n_bearings per-beam bearings (radians, monotonic) — the REAL,
 //           non-uniform Oculus beam table. The remap interpolates azimuth ->
 //           fractional beam index against this (a uniform (az-min)/db mapping
@@ -43,7 +44,7 @@ FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,
 // fan_out: geom.height rows x geom.width cols x 3, range 0 at the bottom
 //          edge, azimuth 0 up (the CPU remapRectSonarImage output).
 bool drawSonar(const uint8_t* image, int n_ranges, int n_bearings,
-               float min_range, float max_range, const float* azimuths,
+               const float* ranges, const float* azimuths,
                float pixels_per_meter, const uint8_t* lut_rgb,
                uint8_t* rect_out, const FanGeometry& geom, uint8_t* fan_out);
 

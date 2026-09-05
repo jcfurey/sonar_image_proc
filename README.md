@@ -105,6 +105,10 @@ treated as recovered obstacle relief. A multi-view elevation estimator can
 supply a more general surface model later without changing the pinhole
 projection itself.
 
+The Cartesian fan interpolates both range and bearing against the ping's
+actual coordinate tables on CPU and CUDA. Changing interior range samples
+invalidates its cached remap even if the endpoints and dimensions stay fixed.
+
 * `fan_info` (`sonar_image_proc/FanImageInfo`) carries the exact per-ping
 orthographic geometry of `drawn_sonar_clean`: dimensions, fan apex, pixels per
 metre, range limits, and bearing limits. Consumers should pair it with the
