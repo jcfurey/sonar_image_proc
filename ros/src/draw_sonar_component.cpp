@@ -506,11 +506,6 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
         rectified_elapsed = SteadyClock::now() - begin;
         begin = SteadyClock::now();
 
-        publishFloorProjectedProducts(working_msg, interface, rect_mat);
-
-        floor_projected_elapsed = SteadyClock::now() - begin;
-        begin = SteadyClock::now();
-
         if (!gpu_drawn)
           sonar_mat = sonar_drawer_.remapRectSonarImage(interface, rect_mat);
 
@@ -565,6 +560,13 @@ DrawSonarComponent::DrawSonarComponent(const rclcpp::NodeOptions & options)
           cvBridgeAndPublish(working_msg, annotated_mat, osd_pub_);
 
         map_elapsed = SteadyClock::now() - begin;
+
+        // The floor projection may wait up to floor_projection_tf_timeout for
+        // each of two TF lookups at the ping stamp. Run it after the fan and
+        // fan_info are out so the operator fan never waits on it.
+        begin = SteadyClock::now();
+        publishFloorProjectedProducts(working_msg, interface, rect_mat);
+        floor_projected_elapsed = SteadyClock::now() - begin;
       }
 
       if (publish_timing_) {

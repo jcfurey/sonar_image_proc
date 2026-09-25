@@ -120,6 +120,7 @@ __device__ inline void cubic_coeffs(float t, float* w)
 __global__ void fan_cubic_kernel(const std::uint8_t* __restrict__ rect,
                                  int n_ranges, int n_bearings, int out_w,
                                  int out_h, int originx, float ppm,
+                                 float max_range,
                                  const float* __restrict__ ranges,
                                  const float* __restrict__ azimuths,
                                  std::uint8_t* __restrict__ fan)
@@ -137,7 +138,8 @@ __global__ void fan_cubic_kernel(const std::uint8_t* __restrict__ rect,
   const float range_m = range_px / ppm;
 
   std::uint8_t* out = fan + 3 * idx;
-  if (range_m < ranges[0] || range_m > ranges[n_ranges - 1]) {
+  // Match CachedMap::create: gate on the displayed range, not the canvas edge.
+  if (range_m < ranges[0] || range_m > fminf(ranges[n_ranges - 1], max_range)) {
     out[0] = 0;
     out[1] = 0;
     out[2] = 0;
@@ -219,6 +221,7 @@ FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,
 {
   // identical to SonarDrawer::CachedMap::create's canvas math
   FanGeometry g;
+  g.max_range = max_range;
   g.height = static_cast<int>(std::ceil(max_range * pixels_per_meter));
   const int minus_width =
     static_cast<int>(std::floor(g.height * std::sin(azimuth_min)));
@@ -280,7 +283,9 @@ bool drawSonar(const std::uint8_t* image, int n_ranges, int n_bearings,
   fan_cubic_kernel<<<(static_cast<int>(n_fan) + threads - 1) / threads,
                      threads>>>(
     rect_buf.as<std::uint8_t>(), n_ranges, n_bearings, geom.width, geom.height,
-    geom.originx, pixels_per_meter, range_buf.as<float>(), az_buf.as<float>(),
+    geom.originx, pixels_per_meter,
+    geom.max_range > 0.0f ? geom.max_range : ranges[n_ranges - 1],
+    range_buf.as<float>(), az_buf.as<float>(),
     fan_buf.as<std::uint8_t>());
   if (!check(cudaGetLastError(), "gpu_draw launch")) return false;
 

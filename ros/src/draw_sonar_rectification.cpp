@@ -62,7 +62,7 @@ sensor_msgs::msg::CameraInfo makePinholeInfo(
   info.d.assign(5, 0.0);
   info.k = {camera.fx, 0.0, camera.cx, 0.0, camera.fy, camera.cy,
             0.0, 0.0, 1.0};
-  info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0};
+  info.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
   info.p = {camera.fx, 0.0, camera.cx, 0.0, 0.0, camera.fy,
             camera.cy, 0.0, 0.0, 0.0, 1.0, 0.0};
   return info;

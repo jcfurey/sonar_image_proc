@@ -450,7 +450,10 @@ void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
   // where minRange()/maxRange() are virtual calls into the ping that also
   // re-check the cached-bounds state -- millions of times per map.
   const float minRange = ping.minRange();
-  const float sourceMaxRange = ping.maxRange();
+  // The canvas ends at displayMaxRange, but its top corners lie farther from
+  // the origin. Gate on the displayed range so a cropped fan ends at the arc
+  // that fan_info and the overlay report, rather than at the canvas edge.
+  const float gateMaxRange = std::min(ping.maxRange(), displayMaxRange);
   const int rows = newmap.rows, cols = newmap.cols;
 
   // For cv::remap, a map is
@@ -490,7 +493,7 @@ void SonarDrawer::CachedMap::Entry::create(const AbstractSonarInterface &ping,
 
       // Clamp to valid range and convert to bin index
       float xp;
-      if (rangeInMeters < minRange || rangeInMeters > sourceMaxRange) {
+      if (rangeInMeters < minRange || rangeInMeters > gateMaxRange) {
         // Out of range - map to transparent/invalid
         xp = -1.0f;  // Will be clamped/handled by remap
       } else {
@@ -1028,7 +1031,11 @@ void SonarDrawer::CachedRectifiedMap::Entry::create(
 
   std::vector<float> rangeIndices(geometry.height, -1.0f);
   for (int v = 0; v < geometry.height; ++v) {
-    const float range = geometry.max_range - v * geometry.meters_per_row;
+    // The last row is min_range by construction; computing it from the step
+    // can round just below ranges[0] and blank the nearest row.
+    const float range = v == geometry.height - 1
+                            ? geometry.min_range
+                            : geometry.max_range - v * geometry.meters_per_row;
     rangeIndices[v] =
         coordinateToIndex(ping.ranges(), range, rangesAscending);
   }

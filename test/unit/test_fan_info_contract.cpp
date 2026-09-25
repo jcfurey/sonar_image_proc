@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -212,6 +213,12 @@ TEST(FanInfoContract, PublishesTruthfulFanAndRectifiedGeometry) {
               2.0 * std::cos(0.5) / std::tan(0.5), 1e-6);
   EXPECT_DOUBLE_EQ(floor_projected_info->k[2], 3.0);
   EXPECT_DOUBLE_EQ(floor_projected_info->k[5], 2.0);
+  // An unrectified pinhole: R must be the identity, not a singular matrix
+  // that image_geometry consumers would invert or compose.
+  const std::array<double, 9> identity{1.0, 0.0, 0.0, 0.0, 1.0,
+                                       0.0, 0.0, 0.0, 1.0};
+  for (size_t i = 0; i < identity.size(); ++i)
+    EXPECT_DOUBLE_EQ(floor_projected_info->r[i], identity[i]) << "r[" << i << "]";
   const double corner_x =
       (0.0 - floor_projected_info->k[2]) / floor_projected_info->k[0];
   const double corner_horizontal_range = std::hypot(corner_x, 1.0);

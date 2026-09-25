@@ -127,6 +127,24 @@ TEST(TestDrawSonar, RectifiedImageHasCameraStyleOrientation) {
   EXPECT_NEAR(rectified.at<float>(0, 2), 1.00f, 1e-6f);
 }
 
+TEST(TestDrawSonar, RectifiedNearestRowSamplesTheFirstRangeBin) {
+  // An Oculus-style bin-centre table where max_range - (height-1) * step
+  // rounds just below ranges[0]; the nearest row used to render black.
+  constexpr int kBins = 200;
+  std::vector<float> ranges(kBins);
+  for (int i = 0; i < kBins; ++i) ranges[i] = (i + 0.5f) * (40.0f / kBins);
+  TestPing ping(ranges, {-0.5f, 0.0f, 0.5f});
+  const cv::Mat source(3, kBins, CV_32FC1, cv::Scalar(1.0f));
+
+  sonar_image_proc::SonarDrawer drawer;
+  const auto geometry = drawer.rectifiedImageGeometry(ping);
+  ASSERT_TRUE(geometry.valid());
+  const cv::Mat rectified =
+      drawer.rectifyRangeBearingImage(ping, source, geometry);
+  EXPECT_NEAR(rectified.at<float>(rectified.rows - 1, rectified.cols / 2),
+              1.0f, 1e-6f);
+}
+
 TEST(TestDrawSonar, RectifiedImageUsesActualNonUniformRangeTable) {
   const float edge = std::atan(1.0f);
   TestPing ping({0.0f, 0.25f, 2.0f}, {-edge, 0.0f, edge});
@@ -543,6 +561,26 @@ TEST(TestDrawSonar, MaxRangeClipsFanAndInvalidatesCachedMap) {
   EXPECT_EQ(restored.size(), full.size());
 }
 
+TEST(TestDrawSonar, MaxRangeBlanksCanvasCornersBeyondTheDisplayedArc) {
+  TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f},
+                {-static_cast<float>(M_PI) / 6.0f, 0.0f,
+                 static_cast<float>(M_PI) / 6.0f});
+  const cv::Mat rect(3, 5, CV_32FC1, cv::Scalar(1.0f));
+
+  sonar_image_proc::SonarDrawer drawer;
+  drawer.setPixelsPerMeter(10.0f);
+  drawer.setMaxRange(2.0f);
+  const cv::Mat fan = drawer.remapRectSonarImage(ping, rect);
+  ASSERT_EQ(fan.rows, 20);
+
+  // origin_x = |floor(20 * sin(-30 deg))| = 10. The top-left corner is
+  // hypot(10, 20) / 10 = 2.24 m away at -26.6 deg: inside the aperture and the
+  // 4 m source, but beyond the 2 m displayed arc, so it must stay black.
+  EXPECT_EQ(fan.at<float>(0, 0), 0.0f);
+  // Just inside the arc on boresight the returns are still drawn.
+  EXPECT_GT(fan.at<float>(1, 10), 0.5f);
+}
+
 TEST(TestDrawSonar, MaximumRangeMapsToLastSourceColumn) {
   TestPing ping({0.0f, 1.0f, 2.0f, 3.0f, 4.0f},
                 {-static_cast<float>(M_PI) / 6.0f, 0.0f,
@@ -801,6 +839,19 @@ TEST(TestDrawSonar, CudaFanMatchesCpuWithNonuniformRangesAndBearings) {
       // OpenCV quantizes map coordinates to 1/32 pixel; CUDA retains float.
       EXPECT_LT(cv::mean(difference)[0], 1.0);
       EXPECT_LE(cv::norm(difference, cv::NORM_INF), 10.0);
+      // The GPU must also end at the displayed 3 m arc, not the canvas edge.
+      int lit_beyond_arc = 0;
+      for (int y = 0; y < fan.rows; ++y) {
+        for (int x = 0; x < fan.cols; ++x) {
+          const float radius_m =
+              std::hypot(static_cast<float>(x - g.originx),
+                         static_cast<float>(g.height - y)) / 32.0f;
+          if (radius_m > 3.0f + 1.0f / 32.0f &&
+              fan.at<cv::Vec3b>(y, x) != cv::Vec3b(0, 0, 0))
+            ++lit_beyond_arc;
+        }
+      }
+      EXPECT_EQ(lit_beyond_arc, 0);
     }
   }
 }

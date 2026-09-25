@@ -28,6 +28,8 @@ struct FanGeometry {
   int width = 0;
   int height = 0;
   int originx = 0;
+  // Displayed range in metres; pixels beyond it are black, as on the CPU path.
+  float max_range = 0.0f;
 };
 FanGeometry fanGeometry(float max_range, float azimuth_min, float azimuth_max,
                         float pixels_per_meter);
